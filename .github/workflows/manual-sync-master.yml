@@ -1,0 +1,27 @@
+name: 手动同步上游代码
+on:
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 执行同步
+        run: |
+          git config --global user.name 'GitHub Action'
+          git config --global user.email 'action@github.com'
+          
+          git remote add upstream https://github.com/MetaCubeX/subconverter.git
+          git fetch upstream
+          
+          # 关键点：切换到 master 分支进行操作
+          git checkout master
+          git reset --hard upstream/master
+          
+          # 推送回你自己的 master
+          git push origin master --force
