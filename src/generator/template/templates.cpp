@@ -317,6 +317,7 @@ int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &rulese
     string_map keywords, urls, names;
     std::map<std::string, bool> has_domain, has_ipcidr;
     std::map<std::string, int> ruleset_interval, rule_type;
+    std::map<std::string, std::string> ruleset_user_agent;
     string_array rules;
     int index = 0;
 
@@ -365,6 +366,8 @@ int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &rulese
                 urls[rule_name] = "*" + rule_path;
                 rule_type[rule_name] = x.rule_type;
                 ruleset_interval[rule_name] = x.update_interval;
+                if(!x.user_agent.empty())
+                    ruleset_user_agent[rule_name] = x.user_agent;
                 switch(x.rule_type)
                 {
                 case RULESET_CLASH_IPCIDR:
@@ -394,6 +397,8 @@ int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &rulese
                     urls[rule_name] = rule_path_typed;
                     rule_type[rule_name] = x.rule_type;
                     ruleset_interval[rule_name] = x.update_interval;
+                    if(!x.user_agent.empty())
+                        ruleset_user_agent[rule_name] = x.user_agent;
                     if(clash_classical_ruleset)
                     {
                         if(!script)
@@ -485,6 +490,7 @@ int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &rulese
         std::string url = urls[x], keyword = keywords[x], name = names[x];
         bool group_has_domain = has_domain[x], group_has_ipcidr = has_ipcidr[x];
         int interval = ruleset_interval[x];
+        std::string user_agent = ruleset_user_agent[x];
 
         if(group_has_domain)
         {
@@ -500,6 +506,8 @@ int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &rulese
             base_rule["rule-providers"][yaml_key]["path"] = "./providers/" + std::to_string(hash_(url)) + "_domain.yaml";
             if(interval)
                 base_rule["rule-providers"][yaml_key]["interval"] = interval;
+            if(!user_agent.empty())
+                base_rule["rule-providers"][yaml_key]["header"]["User-Agent"].push_back(user_agent);
         }
         if(group_has_ipcidr)
         {
@@ -515,6 +523,8 @@ int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &rulese
             base_rule["rule-providers"][yaml_key]["path"] = "./providers/" + std::to_string(hash_(url)) + "_ipcidr.yaml";
             if(interval)
                 base_rule["rule-providers"][yaml_key]["interval"] = interval;
+            if(!user_agent.empty())
+                base_rule["rule-providers"][yaml_key]["header"]["User-Agent"].push_back(user_agent);
         }
         if(!group_has_domain && !group_has_ipcidr)
         {
@@ -528,6 +538,8 @@ int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &rulese
             base_rule["rule-providers"][yaml_key]["path"] = "./providers/" + std::to_string(hash_(url)) + ".yaml";
             if(interval)
                 base_rule["rule-providers"][yaml_key]["interval"] = interval;
+            if(!user_agent.empty())
+                base_rule["rule-providers"][yaml_key]["header"]["User-Agent"].push_back(user_agent);
         }
         if(script)
         {

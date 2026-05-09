@@ -18,6 +18,7 @@ struct RulesetConfig
     //RulesetType Type = RulesetType::SurgeRuleset;
     String Url;
     Integer Interval = 86400;
+    String UserAgent;
     bool operator==(const RulesetConfig &r) const
     {
         return Group == r.Group && Url == r.Url && Interval == r.Interval;

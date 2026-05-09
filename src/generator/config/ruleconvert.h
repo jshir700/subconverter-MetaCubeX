@@ -27,6 +27,7 @@ struct RulesetContent
     int rule_type = RULESET_SURGE;
     std::shared_future<std::string> rule_content;
     int update_interval = 0;
+    std::string user_agent;
 };
 
 std::string convertRuleset(const std::string &content, int type);

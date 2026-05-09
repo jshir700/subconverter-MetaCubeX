@@ -136,6 +136,7 @@ namespace toml
             }
             conf.Url += find<String>(v, "ruleset");
             conf.Interval = find_or<Integer>(v, "interval", 86400);
+            conf.UserAgent = find_or<String>(v, "ua", "");
             return conf;
         }
     };
@@ -312,14 +313,31 @@ namespace INIBinding
                     confs.emplace_back(std::move(conf));
                     continue;
                 }
-                String::size_type epos = x.rfind(",");
-                if(pos != epos)
+                String::size_type uapos = x.find(",ua=");
+                if(uapos != String::npos)
                 {
-                    conf.Interval = to_int(x.substr(epos + 1), 0);
-                    conf.Url = x.substr(pos + 1, epos - pos - 1);
+                    conf.UserAgent = x.substr(uapos + 4);
+                    String base = x.substr(pos + 1, uapos - pos - 1);
+                    String::size_type base_epos = base.rfind(",");
+                    if(base_epos != String::npos)
+                    {
+                        conf.Interval = to_int(base.substr(base_epos + 1), 0);
+                        conf.Url = base.substr(0, base_epos);
+                    }
+                    else
+                        conf.Url = base;
                 }
                 else
-                    conf.Url = x.substr(pos + 1);
+                {
+                    String::size_type epos = x.rfind(",");
+                    if(pos != epos)
+                    {
+                        conf.Interval = to_int(x.substr(epos + 1), 0);
+                        conf.Url = x.substr(pos + 1, epos - pos - 1);
+                    }
+                    else
+                        conf.Url = x.substr(pos + 1);
+                }
                 confs.emplace_back(std::move(conf));
             }
             return confs;

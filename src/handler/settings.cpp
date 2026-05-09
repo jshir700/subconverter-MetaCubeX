@@ -219,7 +219,7 @@ void readRuleset(YAML::Node node, string_array &dest, bool scope_limit = true)
 {
     for(auto && object : node)
     {
-        std::string strLine, name, url, group, interval;
+        std::string strLine, name, url, group, interval, ua;
         object["import"] >>= name;
         if(!name.empty())
         {
@@ -230,11 +230,14 @@ void readRuleset(YAML::Node node, string_array &dest, bool scope_limit = true)
         object["group"] >>= group;
         object["rule"] >>= name;
         object["interval"] >>= interval;
+        object["ua"] >>= ua;
         if(!url.empty())
         {
             strLine = group + "," + url;
             if(!interval.empty())
                 strLine += "," + interval;
+            if(!ua.empty())
+                strLine += ",ua=" + ua;
         }
         else if(!name.empty())
             strLine = group + ",[]" + name;
@@ -261,7 +264,7 @@ void refreshRulesets(RulesetConfigs &ruleset_list, std::vector<RulesetContent> &
         if(pos != std::string::npos)
         {
             writeLog(0, "Adding rule '" + rule_url.substr(pos + 2) + "," + rule_group + "'.", LOG_LEVEL_INFO);
-            rc = {rule_group, "", "", RULESET_SURGE, std::async(std::launch::async, [=](){return rule_url.substr(pos);}), 0};
+            rc = {rule_group, "", "", RULESET_SURGE, std::async(std::launch::async, [=](){return rule_url.substr(pos);}), 0, x.UserAgent};
         }
         else
         {
@@ -274,7 +277,7 @@ void refreshRulesets(RulesetConfigs &ruleset_list, std::vector<RulesetContent> &
                 type = iter->second;
             }
             writeLog(0, "Updating ruleset url '" + rule_url + "' with group '" + rule_group + "'.", LOG_LEVEL_INFO);
-            rc = {rule_group, rule_url, rule_url_typed, type, fetchFileAsync(rule_url, proxy, global.cacheRuleset, true, global.asyncFetchRuleset), x.Interval};
+            rc = {rule_group, rule_url, rule_url_typed, type, fetchFileAsync(rule_url, proxy, global.cacheRuleset, true, global.asyncFetchRuleset, x.UserAgent), x.Interval, x.UserAgent};
         }
         ruleset_content_array.emplace_back(std::move(rc));
     }
