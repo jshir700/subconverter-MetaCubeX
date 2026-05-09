@@ -405,6 +405,9 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
     template_args tpl_args;
     tpl_args.global_vars = global.templateVars;
     tpl_args.request_params = req_arg_map;
+    // Inject resolved User-Agent into template context as {{ global.ua }}
+    if(!argUserAgent.empty())
+        tpl_args.global_vars["ua"] = argUserAgent;
 
     /// check for proxy settings
     std::string proxy = parseProxy(global.proxySubscription);
@@ -1568,6 +1571,12 @@ std::string renderTemplate(RESPONSE_CALLBACK_ARGS)
         req_arg_map[x.first] = x.second;
     }
     tpl_args.request_params = req_arg_map;
+    // Inject &ua= parameter into template context as {{ global.ua }}
+    std::string tpl_ua = getUrlArg(argument, "ua");
+    if(tpl_ua.empty() && !global.user_agent.empty())
+        tpl_ua = global.user_agent;
+    if(!tpl_ua.empty())
+        tpl_args.global_vars["ua"] = tpl_ua;
 
     std::string output_content;
     if(render_template(template_content, tpl_args, output_content, global.templatePath) != 0)
