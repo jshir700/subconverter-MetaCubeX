@@ -269,7 +269,14 @@ static int curlGet(const FetchArgument &argument, FetchResult &result)
     if(data && !argument.keep_resp_on_fail)
     {
         if(retVal != CURLE_OK || *result.status_code != 200)
+        {
+            writeLog(0, "curlGet: fetch failed for '" + argument.url + "'" +
+                           " curl_code=" + std::to_string(retVal) +
+                           " (" + (retVal != CURLE_OK ? curl_easy_strerror(retVal) : "OK") + ")" +
+                           " http_status=" + std::to_string(*result.status_code),
+                     LOG_LEVEL_WARNING);
             data->clear();
+        }
         data->shrink_to_fit();
     }
 

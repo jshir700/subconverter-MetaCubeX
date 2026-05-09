@@ -154,18 +154,37 @@ std::string getRuleset(RESPONSE_CALLBACK_ARGS)
         x.insert(0, "ruleset,");
     std::vector<RulesetContent> rca;
     RulesetConfigs confs = INIBinding::from<RulesetConfig>::from_ini(vArray);
+
+    writeLog(0, "[getruleset] url='" + url + "', type=" + type + ", group='" + group + "'", LOG_LEVEL_INFO);
+    writeLog(0, "[getruleset] incoming User-Agent header: '" +
+                   (request.headers.contains("User-Agent") ? request.headers.at("User-Agent") : "(none)") + "'",
+             LOG_LEVEL_INFO);
+
     // Propagate incoming request's User-Agent to ruleset configs that don't have their own UA
     if (request.headers.contains("User-Agent")) {
         const std::string &req_ua = request.headers.at("User-Agent");
         for (auto &cfg : confs) {
-            if (cfg.UserAgent.empty())
+            if (cfg.UserAgent.empty()) {
                 cfg.UserAgent = req_ua;
+                writeLog(0, "[getruleset] propagated UA to ruleset config: url='" + cfg.Url + "'", LOG_LEVEL_INFO);
+            }
         }
     }
+
+    for (auto &cfg : confs) {
+        writeLog(0, "[getruleset] config: url='" + cfg.Url + "', group='" + cfg.Group + "', UA='" +
+                       (cfg.UserAgent.empty() ? "(default)" : cfg.UserAgent) + "'",
+                 LOG_LEVEL_INFO);
+    }
+
     refreshRulesets(confs, rca);
     for(RulesetContent &x : rca)
     {
         std::string content = x.rule_content.get();
+        writeLog(0, "[getruleset] fetched content size=" + std::to_string(content.size()) +
+                       ", type=" + std::to_string(x.rule_type) +
+                       ", first_100='" + content.substr(0, 100) + "'",
+                 LOG_LEVEL_INFO);
         output_content += convertRuleset(content, x.rule_type);
     }
 
