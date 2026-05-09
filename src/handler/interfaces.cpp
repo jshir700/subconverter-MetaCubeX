@@ -154,6 +154,14 @@ std::string getRuleset(RESPONSE_CALLBACK_ARGS)
         x.insert(0, "ruleset,");
     std::vector<RulesetContent> rca;
     RulesetConfigs confs = INIBinding::from<RulesetConfig>::from_ini(vArray);
+    // Propagate incoming request's User-Agent to ruleset configs that don't have their own UA
+    if (request.headers.contains("User-Agent")) {
+        const std::string &req_ua = request.headers.at("User-Agent");
+        for (auto &cfg : confs) {
+            if (cfg.UserAgent.empty())
+                cfg.UserAgent = req_ua;
+        }
+    }
     refreshRulesets(confs, rca);
     for(RulesetContent &x : rca)
     {
