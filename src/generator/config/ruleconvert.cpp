@@ -26,7 +26,18 @@ std::string convertRuleset(const std::string &content, int type)
     std::string output, strLine;
 
     if(type == RULESET_SURGE)
+    {
+        // Auto-detect Clash YAML payload format even when type is RULESET_SURGE (default/unknown).
+        // Content from URLs without explicit type prefix defaults to RULESET_SURGE, but may be
+        // in Clash payload format. Without conversion, lines like "  - 'DOMAIN-SUFFIX,...'"
+        // fail startsWith() checks in getRuleset() -> placeholder output.
+        if(regFind(content, "payload:\\r?\\n"))
+        {
+            output = regReplace(regReplace(content, "payload:\\r?\\n", "", true), R"(\s?^\s*-\s+('|"?)(.*)\1$)", "\n$2", true);
+            return output;
+        }
         return content;
+    }
 
     if(regFind(content, "^payload:\\r?\\n")) /// Clash
     {
