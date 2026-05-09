@@ -300,6 +300,33 @@ std::string buildSocks5ProxyString(const std::string &addr, int port, const std:
     return proxystr;
 }
 
+static std::string build_cache_key(const std::string &url, const std::string &proxy,
+                                   const string_icase_map *request_headers)
+{
+    if(proxy.empty() && (!request_headers || request_headers->empty()))
+        return getMD5(url);
+
+    std::string identity = "url:" + std::to_string(url.size()) + ":" + url;
+    identity += "\nproxy:" + std::to_string(proxy.size()) + ":" + proxy;
+    identity += "\nheaders:";
+    if(request_headers)
+    {
+        for(const auto &header : *request_headers)
+        {
+            std::string name = toLower(header.first);
+            identity += "\n" + name + ":" + std::to_string(header.second.size()) + ":" +
+                        header.second;
+        }
+        if(!request_headers->contains("User-Agent"))
+        {
+            std::string default_user_agent = user_agent_str;
+            identity += "\nuser-agent:" + std::to_string(default_user_agent.size()) + ":" +
+                        default_user_agent;
+        }
+    }
+    return getMD5(identity);
+}
+
 std::string webGet(const std::string &url, const std::string &proxy, unsigned int cache_ttl, std::string *response_headers, string_icase_map *request_headers, long timeout)
 {
     int return_code = 0;
@@ -314,7 +341,7 @@ std::string webGet(const std::string &url, const std::string &proxy, unsigned in
     if(cache_ttl > 0)
     {
         md("cache");
-        const std::string url_md5 = getMD5(url);
+        const std::string url_md5 = build_cache_key(url, proxy, request_headers);
         const std::string path = "cache/" + url_md5, path_header = path + "_header";
         struct stat result {};
         if(stat(path.data(), &result) == 0) // cache exist
