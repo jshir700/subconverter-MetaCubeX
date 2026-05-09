@@ -5,6 +5,20 @@
 #include <string>
 #include <vector>
 
+// Cross-version double-quoting helper for yaml-cpp.
+// yaml-cpp 0.7+ supports EmitterStyle::DoubleQuoted via SetStyle().
+// yaml-cpp < 0.7 does not have DoubleQuoted in the EmitterStyle enum,
+// so the style is left as default (unquoted, which is still valid YAML).
+inline YAML::Node make_yaml_quoted_scalar(const std::string &value)
+{
+    YAML::Node node(value);
+#if defined(YAML_CPP_MAJOR_VERSION) && \
+    (YAML_CPP_MAJOR_VERSION > 0 || YAML_CPP_MINOR_VERSION >= 7)
+    node.SetStyle(YAML::EmitterStyle::DoubleQuoted);
+#endif
+    return node;
+}
+
 template <typename T> void operator >> (const YAML::Node& node, T& i)
 {
     if(node.IsDefined() && !node.IsNull()) //fail-safe

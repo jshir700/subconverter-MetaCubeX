@@ -507,11 +507,7 @@ int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &rulese
             if(interval)
                 base_rule["rule-providers"][yaml_key]["interval"] = interval;
             if(!user_agent.empty())
-            {
-                YAML::Node ua_node(user_agent);
-                ua_node.SetStyle(YAML::EmitterStyle::DoubleQuoted);
-                base_rule["rule-providers"][yaml_key]["header"]["User-Agent"].push_back(ua_node);
-            }
+                base_rule["rule-providers"][yaml_key]["header"]["User-Agent"].push_back(make_yaml_quoted_scalar(user_agent));
         }
         if(group_has_ipcidr)
         {
@@ -528,11 +524,7 @@ int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &rulese
             if(interval)
                 base_rule["rule-providers"][yaml_key]["interval"] = interval;
             if(!user_agent.empty())
-            {
-                YAML::Node ua_node(user_agent);
-                ua_node.SetStyle(YAML::EmitterStyle::DoubleQuoted);
-                base_rule["rule-providers"][yaml_key]["header"]["User-Agent"].push_back(ua_node);
-            }
+                base_rule["rule-providers"][yaml_key]["header"]["User-Agent"].push_back(make_yaml_quoted_scalar(user_agent));
         }
         if(!group_has_domain && !group_has_ipcidr)
         {
@@ -547,11 +539,7 @@ int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &rulese
             if(interval)
                 base_rule["rule-providers"][yaml_key]["interval"] = interval;
             if(!user_agent.empty())
-            {
-                YAML::Node ua_node(user_agent);
-                ua_node.SetStyle(YAML::EmitterStyle::DoubleQuoted);
-                base_rule["rule-providers"][yaml_key]["header"]["User-Agent"].push_back(ua_node);
-            }
+                base_rule["rule-providers"][yaml_key]["header"]["User-Agent"].push_back(make_yaml_quoted_scalar(user_agent));
         }
         if(script)
         {
