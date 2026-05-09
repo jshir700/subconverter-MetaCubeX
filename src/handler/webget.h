@@ -25,6 +25,7 @@ struct FetchArgument
     std::string *cookies = nullptr;
     const unsigned int cache_ttl = 0;
     const bool keep_resp_on_fail = false;
+    const long timeout = 0; // 0 = use global.fetch_timeout default
 };
 
 struct FetchResult
@@ -36,10 +37,11 @@ struct FetchResult
 };
 
 int webGet(const FetchArgument& argument, FetchResult &result);
-std::string webGet(const std::string &url, const std::string &proxy = "", unsigned int cache_ttl = 0, std::string *response_headers = nullptr, string_icase_map *request_headers = nullptr);
+std::string webGet(const std::string &url, const std::string &proxy = "", unsigned int cache_ttl = 0, std::string *response_headers = nullptr, string_icase_map *request_headers = nullptr, long timeout = 0);
 void flushCache();
-int webPost(const std::string &url, const std::string &data, const std::string &proxy, const string_icase_map &request_headers, std::string *retData);
-int webPatch(const std::string &url, const std::string &data, const std::string &proxy, const string_icase_map &request_headers, std::string *retData);
+int webPost(const std::string &url, const std::string &data, const std::string &proxy, const string_icase_map &request_headers, std::string *retData, long timeout = 0);
+int webPatch(const std::string &url, const std::string &data, const std::string &proxy, const string_icase_map &request_headers, std::string *retData, long timeout = 0);
+int webHead(const std::string &url, const std::string &proxy, const string_icase_map &request_headers, std::string &response_headers, long timeout = 0);
 std::string buildSocks5ProxyString(const std::string &addr, int port, const std::string &username, const std::string &password);
 
 // Unimplemented: (CURLOPT_HTTPHEADER: Host:)

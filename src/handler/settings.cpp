@@ -547,6 +547,7 @@ void readYAMLConf(YAML::Node &node)
         node["advanced"]["max_allowed_rulesets"] >> global.maxAllowedRulesets;
         node["advanced"]["max_allowed_rules"] >> global.maxAllowedRules;
         node["advanced"]["max_allowed_download_size"] >> global.maxAllowedDownloadSize;
+        node["advanced"]["fetch_timeout"] >> global.fetch_timeout;
         if(node["advanced"]["enable_cache"].IsDefined())
         {
             if(safe_as<bool>(node["advanced"]["enable_cache"]))
@@ -734,6 +735,7 @@ void readTOMLConf(toml::value &root)
                   "max_allowed_rulesets", global.maxAllowedRulesets,
                   "max_allowed_rules", global.maxAllowedRules,
                   "max_allowed_download_size", global.maxAllowedDownloadSize,
+                  "fetch_timeout", global.fetch_timeout,
                   "enable_cache", enable_cache,
                   "cache_subscription", cache_subscription,
                   "cache_config", cache_config,
@@ -1052,6 +1054,7 @@ void readConf()
     ini.get_number_if_exist("max_allowed_rulesets", global.maxAllowedRulesets);
     ini.get_number_if_exist("max_allowed_rules", global.maxAllowedRules);
     ini.get_number_if_exist("max_allowed_download_size", global.maxAllowedDownloadSize);
+    ini.get_number_if_exist("fetch_timeout", global.fetch_timeout);
     if(ini.item_exist("enable_cache"))
     {
         if(ini.get_bool("enable_cache"))

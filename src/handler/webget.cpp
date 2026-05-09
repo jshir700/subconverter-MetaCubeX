@@ -36,6 +36,7 @@ static auto user_agent_str = "subconverter/" VERSION " cURL/" LIBCURL_VERSION;
 struct curl_progress_data
 {
     long size_limit = 0L;
+    long timeout = 0L; // 0 = use global.fetch_timeout default
 };
 
 static inline void curl_init()
@@ -131,7 +132,8 @@ static inline void curl_set_common_options(CURL *curl_handle, const char *url, c
     curl_easy_setopt(curl_handle, CURLOPT_MAXREDIRS, 20L);
     curl_easy_setopt(curl_handle, CURLOPT_SSL_VERIFYPEER, 0L);
     curl_easy_setopt(curl_handle, CURLOPT_SSL_VERIFYHOST, 0L);
-    curl_easy_setopt(curl_handle, CURLOPT_TIMEOUT, 15L);
+    long timeout = data && data->timeout > 0 ? data->timeout : global.fetch_timeout;
+    curl_easy_setopt(curl_handle, CURLOPT_TIMEOUT, timeout);
     curl_easy_setopt(curl_handle, CURLOPT_COOKIEFILE, "");
     if(data)
     {
@@ -166,6 +168,7 @@ static int curlGet(const FetchArgument &argument, FetchResult &result)
     }
     curl_progress_data limit;
     limit.size_limit = global.maxAllowedDownloadSize;
+    limit.timeout = argument.timeout;
     curl_set_common_options(curl_handle, new_url.data(), &limit);
     header_list = curl_slist_append(header_list, "Content-Type: application/json;charset=utf-8");
     if(argument.request_headers)
@@ -297,12 +300,12 @@ std::string buildSocks5ProxyString(const std::string &addr, int port, const std:
     return proxystr;
 }
 
-std::string webGet(const std::string &url, const std::string &proxy, unsigned int cache_ttl, std::string *response_headers, string_icase_map *request_headers)
+std::string webGet(const std::string &url, const std::string &proxy, unsigned int cache_ttl, std::string *response_headers, string_icase_map *request_headers, long timeout)
 {
     int return_code = 0;
     std::string content;
 
-    FetchArgument argument {HTTP_GET, url, proxy, nullptr, request_headers, nullptr, cache_ttl};
+    FetchArgument argument {HTTP_GET, url, proxy, nullptr, request_headers, nullptr, cache_ttl, false, timeout};
     FetchResult fetch_res {&return_code, &content, response_headers, nullptr};
 
     if (startsWith(url, "data:"))
@@ -372,29 +375,29 @@ void flushCache()
     operateFiles("cache", [](const std::string &file){ remove(("cache/" + file).data()); return 0; });
 }
 
-int webPost(const std::string &url, const std::string &data, const std::string &proxy, const string_icase_map &request_headers, std::string *retData)
+int webPost(const std::string &url, const std::string &data, const std::string &proxy, const string_icase_map &request_headers, std::string *retData, long timeout)
 {
     //return curlPost(url, data, proxy, request_headers, retData);
     int return_code = 0;
-    FetchArgument argument {HTTP_POST, url, proxy, &data, &request_headers, nullptr, 0, true};
+    FetchArgument argument {HTTP_POST, url, proxy, &data, &request_headers, nullptr, 0, true, timeout};
     FetchResult fetch_res {&return_code, retData, nullptr, nullptr};
     return webGet(argument, fetch_res);
 }
 
-int webPatch(const std::string &url, const std::string &data, const std::string &proxy, const string_icase_map &request_headers, std::string *retData)
+int webPatch(const std::string &url, const std::string &data, const std::string &proxy, const string_icase_map &request_headers, std::string *retData, long timeout)
 {
     //return curlPatch(url, data, proxy, request_headers, retData);
     int return_code = 0;
-    FetchArgument argument {HTTP_PATCH, url, proxy, &data, &request_headers, nullptr, 0, true};
+    FetchArgument argument {HTTP_PATCH, url, proxy, &data, &request_headers, nullptr, 0, true, timeout};
     FetchResult fetch_res {&return_code, retData, nullptr, nullptr};
     return webGet(argument, fetch_res);
 }
 
-int webHead(const std::string &url, const std::string &proxy, const string_icase_map &request_headers, std::string &response_headers)
+int webHead(const std::string &url, const std::string &proxy, const string_icase_map &request_headers, std::string &response_headers, long timeout)
 {
     //return curlHead(url, proxy, request_headers, response_headers);
     int return_code = 0;
-    FetchArgument argument {HTTP_HEAD, url, proxy, nullptr, &request_headers, nullptr, 0};
+    FetchArgument argument {HTTP_HEAD, url, proxy, nullptr, &request_headers, nullptr, 0, false, timeout};
     FetchResult fetch_res {&return_code, nullptr, &response_headers, nullptr};
     return webGet(argument, fetch_res);
 }

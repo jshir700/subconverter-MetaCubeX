@@ -47,6 +47,7 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID, parse_
     std::vector<Proxy> nodes;
     Proxy node;
     std::string strSub, extra_headers, custom_group;
+    long fetch_timeout = parse_set.fetch_timeout ? *parse_set.fetch_timeout : 0;
 
     // TODO: replace with startsWith if appropriate
     link = replaceAllDistinct(link, "\"", "");
@@ -153,7 +154,7 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID, parse_
             custom_headers["User-Agent"] = *parse_set.custom_user_agent;
         }
         
-        strSub = webGet(link, proxy, global.cacheSubscription, &extra_headers, &custom_headers);
+        strSub = webGet(link, proxy, global.cacheSubscription, &extra_headers, &custom_headers, fetch_timeout);
         /*
         if(strSub.size() == 0)
         {
