@@ -145,16 +145,19 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID, parse_
         if(startsWith(link, "surge:///install-config")) //surge config link
             link = urlDecode(getUrlArg(link, "url"));
         
-        // 处理自定义用户代理
-        if(request_headers)
-            custom_headers = *request_headers;
-        
+        // Handle custom User-Agent override from &ua= parameter
+        // Only forward client headers when &ua= is explicitly provided
         if(parse_set.custom_user_agent && !parse_set.custom_user_agent->empty())
         {
+            if(request_headers)
+                custom_headers = *request_headers;
             custom_headers["User-Agent"] = *parse_set.custom_user_agent;
+            strSub = webGet(link, proxy, global.cacheSubscription, &extra_headers, &custom_headers, fetch_timeout);
         }
-        
-        strSub = webGet(link, proxy, global.cacheSubscription, &extra_headers, &custom_headers, fetch_timeout);
+        else
+        {
+            strSub = webGet(link, proxy, global.cacheSubscription, &extra_headers, nullptr, fetch_timeout);
+        }
         /*
         if(strSub.size() == 0)
         {
