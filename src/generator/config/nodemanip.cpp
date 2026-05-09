@@ -145,24 +145,17 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID, parse_
         if(startsWith(link, "surge:///install-config")) //surge config link
             link = urlDecode(getUrlArg(link, "url"));
         
-        // Custom User-Agent from &ua= parameter takes highest priority
+        // Copy client headers if available (preserves client's original UA)
+        if(request_headers)
+            custom_headers = *request_headers;
+
+        // Override User-Agent if &ua= parameter is provided (highest priority)
         if(parse_set.custom_user_agent && !parse_set.custom_user_agent->empty())
-        {
-            if(request_headers)
-                custom_headers = *request_headers;
             custom_headers["User-Agent"] = *parse_set.custom_user_agent;
-            strSub = webGet(link, proxy, global.cacheSubscription, &extra_headers, &custom_headers, fetch_timeout);
-        }
-        // Forward client's default headers (including their UA) when no &ua= override
-        else if(request_headers)
-        {
-            strSub = webGet(link, proxy, global.cacheSubscription, &extra_headers, request_headers, fetch_timeout);
-        }
-        // No client headers available, use subconverter's built-in UA
-        else
-        {
-            strSub = webGet(link, proxy, global.cacheSubscription, &extra_headers, nullptr, fetch_timeout);
-        }
+
+        // Always pass &custom_headers (never nullptr) so webget.cpp can detect
+        // missing User-Agent and fall back to built-in UA via CURLOPT_USERAGENT
+        strSub = webGet(link, proxy, global.cacheSubscription, &extra_headers, &custom_headers, fetch_timeout);
         /*
         if(strSub.size() == 0)
         {

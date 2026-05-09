@@ -335,6 +335,9 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
     std::string argDeviceID = getUrlArg(argument, "dev_id"), argFilename = getUrlArg(argument, "filename"), argUpdateInterval = getUrlArg(argument, "interval"), argUpdateStrict = getUrlArg(argument, "strict");
     std::string argRenames = getUrlArg(argument, "rename"), argFilterScript = getUrlArg(argument, "filter_script");
     std::string argUserAgent = getUrlArg(argument, "ua");
+    // If no &ua= URL parameter, fall back to global-ua from config file
+    if(argUserAgent.empty() && !global.user_agent.empty())
+        argUserAgent = global.user_agent;
     std::string argFetchTimeout = getUrlArg(argument, "fetch_timeout");
 
     /// switches with default value

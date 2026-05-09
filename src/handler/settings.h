@@ -32,6 +32,7 @@ struct Settings
     int logLevel = LOG_LEVEL_VERBOSE;
     long maxAllowedDownloadSize = 1048576L;
     long fetch_timeout = 15L;
+    std::string user_agent;
     string_map aliases;
 
     //global variables for template
