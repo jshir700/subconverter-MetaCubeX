@@ -272,7 +272,7 @@ static int curlGet(const FetchArgument &argument, FetchResult &result)
         {
             writeLog(0, "curlGet: fetch failed for '" + argument.url + "'" +
                            " curl_code=" + std::to_string(retVal) +
-                           " (" + (retVal != CURLE_OK ? curl_easy_strerror(retVal) : "OK") + ")" +
+                           " (" + (retVal != CURLE_OK ? curl_easy_strerror(static_cast<CURLcode>(retVal)) : "OK") + ")" +
                            " http_status=" + std::to_string(*result.status_code),
                      LOG_LEVEL_WARNING);
             data->clear();
