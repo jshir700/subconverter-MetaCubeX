@@ -2,6 +2,7 @@ name: Publish Docker Image
 on:
   push:
     branches: [master]
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.ref }}-${{ github.workflow }}
