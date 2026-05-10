@@ -22,6 +22,7 @@
 #include "utils/yamlcpp_extra.h"
 #include "nodemanip.h"
 #include "ruleconvert.h"
+#include "parser/mihomo_bridge.h"
 
 extern string_array ss_ciphers, ssr_ciphers;
 

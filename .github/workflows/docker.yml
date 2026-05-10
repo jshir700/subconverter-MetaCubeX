@@ -13,7 +13,7 @@ env:
   REGISTRY_IMAGE: jshir700/subconverter-metacubex
 
 jobs:
-  build-dockerhub:
+  build:
     strategy:
       matrix:
         include:
@@ -26,12 +26,12 @@ jobs:
           - platform: linux/arm64
             os: ubuntu-24.04-arm
     runs-on: ${{ matrix.os }}
-    name: Build ${{ matrix.platform }} for Docker Hub
+    name: Build ${{ matrix.platform }} Image
     steps:
       - name: Prepare
         run: |
           platform=${{ matrix.platform }}
-          echo "PLATFORM_PAIR=${platform//\//-}" >> $GITHUB_ENV    
+          echo "PLATFORM_PAIR=${platform//\//-}" >> $GITHUB_ENV
 
       - name: Checkout base
         uses: actions/checkout@v4
@@ -49,6 +49,7 @@ jobs:
           tags: |
             type=semver,pattern={{version}}
             type=raw,value=latest,enable={{is_default_branch}}
+
       - name: Docker login
         uses: docker/login-action@v3
         with:
@@ -65,7 +66,7 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           platforms: ${{ matrix.platform }}
-          context: scripts/
+          context: .
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             SHA=${{ steps.vars.outputs.sha_short }}
@@ -73,28 +74,29 @@ jobs:
 
       - name: Export digest
         run: |
-          rm -rf /tmp/digests-dockerhub
-          mkdir -p /tmp/digests-dockerhub
+          rm -rf /tmp/digests
+          mkdir -p /tmp/digests
           digest="${{ steps.build.outputs.digest }}"
-          touch "/tmp/digests-dockerhub/${digest#sha256:}"
+          touch "/tmp/digests/${digest#sha256:}"
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: digest-dockerhub-${{ env.PLATFORM_PAIR }}
-          path: /tmp/digests-dockerhub/*
+          name: digest-${{ env.PLATFORM_PAIR }}
+          path: /tmp/digests/*
           if-no-files-found: error
           retention-days: 1
 
-  merge-dockerhub:
-    name: Merge Docker Hub
-    needs: build-dockerhub
+  merge:
+    name: Merge
+    needs: build
     runs-on: ubuntu-latest
     steps:
       - name: Download digests
         uses: actions/download-artifact@v4
         with:
-          path: /tmp/digests-dockerhub
-          pattern: digest-dockerhub-*
+          path: /tmp/digests
+          pattern: digest-*
           merge-multiple: true
 
       - name: Set up Docker Buildx
@@ -108,6 +110,7 @@ jobs:
           tags: |
             type=semver,pattern={{version}}
             type=raw,value=latest,enable={{is_default_branch}}
+
       - name: Docker login
         uses: docker/login-action@v3
         with:
@@ -115,10 +118,11 @@ jobs:
           password: ${{ secrets.DOCKER_PASSWORD }}
 
       - name: Create manifest list and push
-        working-directory: /tmp/digests-dockerhub
+        working-directory: /tmp/digests
         run: |
           docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
             $(printf '${{ env.REGISTRY_IMAGE }}@sha256:%s ' *)
+
       - name: Inspect image
         run: |
           docker buildx imagetools inspect ${{ env.REGISTRY_IMAGE }}:${{ steps.meta.outputs.version }}
