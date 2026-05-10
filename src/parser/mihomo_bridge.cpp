@@ -15,10 +15,12 @@
 #endif
 
 // Declare the Go functions exported from the bridge library
+#ifdef USE_MIHOMO_PARSER
 extern "C" {
 GO_CGO_LIBIMPORT char *ConvertSubscription(char *data);
 GO_CGO_LIBIMPORT void FreeString(char *s);
 }
+#endif
 
 namespace mihomo {
 
@@ -112,6 +114,7 @@ static std::string jsonEscape(const std::string &str) {
 }
 
 std::vector<ProxyNode> parseSubscription(const std::string &subscription) {
+#ifdef USE_MIHOMO_PARSER
     std::vector<ProxyNode> result;
 
     if (subscription.empty()) {
@@ -341,6 +344,10 @@ std::vector<ProxyNode> parseSubscription(const std::string &subscription) {
     }
 
     return result;
+#else
+    throw std::runtime_error(
+        "Mihomo parser not available: USE_MIHOMO_PARSER not defined");
+#endif
 }
 
 } // namespace mihomo
