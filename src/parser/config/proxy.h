@@ -1,6 +1,7 @@
 #ifndef PROXY_H_INCLUDED
 #define PROXY_H_INCLUDED
 
+#include <map>
 #include <string>
 #include <vector>
 
@@ -219,6 +220,9 @@ struct Proxy
     // Trojan SS options
     String TrojanSsMethod;
     String TrojanSsPassword;
+
+    // Raw parameters from mihomo parser (pass-through for full protocol compatibility)
+    std::map<String, String> RawParams;
 
 };
 

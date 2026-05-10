@@ -285,6 +285,58 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode, const ProxyGr
         if (!x.UnderlyingProxy.empty())
             singleproxy["dialer-proxy"] = x.UnderlyingProxy;
 
+        // ========== Generic RawParams Pass-Through (from Mihomo parser) ==========
+        // If RawParams are present, use them directly for full protocol compatibility.
+        if (!x.RawParams.empty()) {
+            // Get protocol type for compatibility check
+            std::string protocol = x.RawParams.count("type") ? x.RawParams["type"] : "";
+
+            // Output all RawParams
+            for (const auto &[key, value] : x.RawParams) {
+                // Skip fields we already handled
+                if (key == "name" || key == "server" || key == "port")
+                    continue;
+
+                // Check if value is a JSON string (starts with { or [)
+                if (!value.empty() && (value[0] == '{' || value[0] == '[')) {
+                    try {
+                        YAML::Node parsed = YAML::Load(value);
+                        singleproxy[key] = parsed;
+                    } catch (...) {
+                        singleproxy[key] = value;
+                    }
+                } else {
+                    singleproxy[key] = value;
+                }
+            }
+
+            // Smart Global Parameter Application with Hardcode Protection
+            if (!udp.is_undef()) {
+                if (mihomo::isParamSupported(protocol, "udp") &&
+                    !mihomo::isParamHardcoded(protocol, "udp")) {
+                    singleproxy["udp"] = udp.get();
+                }
+            }
+            if (!scv.is_undef()) {
+                if (mihomo::isParamSupported(protocol, "skip-cert-verify") &&
+                    !mihomo::isParamHardcoded(protocol, "skip-cert-verify")) {
+                    singleproxy["skip-cert-verify"] = scv.get();
+                }
+            }
+            if (!tfo.is_undef()) {
+                if (mihomo::isParamSupported(protocol, "tfo") &&
+                    !mihomo::isParamHardcoded(protocol, "tfo")) {
+                    singleproxy["tfo"] = tfo.get();
+                }
+            }
+
+            singleproxy.SetStyle(YAML::EmitterStyle::Flow);
+            proxies.push_back(singleproxy);
+            nodelist.emplace_back(x);
+
+            continue;
+        }
+
         switch(x.Type)
         {
         case ProxyType::Shadowsocks:

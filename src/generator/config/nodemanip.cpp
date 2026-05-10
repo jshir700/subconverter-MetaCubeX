@@ -5,18 +5,24 @@
 
 #include "handler/settings.h"
 #include "handler/webget.h"
+#include "nodemanip.h"
 #include "parser/config/proxy.h"
+#include "parser/config/proxy_utils.h"
 #include "parser/infoparser.h"
+#include "parser/mihomo_bridge.h"
 #include "parser/subparser.h"
 #include "script/script_quickjs.h"
+#include "subexport.h"
 #include "utils/file_extra.h"
 #include "utils/logger.h"
 #include "utils/map_extra.h"
 #include "utils/network.h"
+#ifdef USE_MIHOMO_PARSER
+#include "parser/mihomo_schemes.h"
+#endif
 #include "utils/regexp.h"
+#include "utils/string.h"
 #include "utils/urlencode.h"
-#include "nodemanip.h"
-#include "subexport.h"
 
 extern Settings global;
 
@@ -126,12 +132,36 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID, parse_
         return 0;
     }
 
+    // ========== Mihomo scheme detection ==========
+    bool isMihomoScheme = false;
+#ifdef USE_MIHOMO_PARSER
+    for (const auto &scheme : mihomo::SUPPORTED_SCHEMES) {
+        if (startsWith(link, scheme + "://")) {
+            isMihomoScheme = true;
+            break;
+        }
+    }
+#endif
+
     writeLog(LOG_TYPE_INFO, "Received Link.");
+
+    // Handle pipe separated links recursively
+    if (link.find('|') != std::string::npos && (isLink(link) || isMihomoScheme)) {
+        std::vector<std::string> links = split(link, "|");
+        for (const auto &l : links) {
+            if (l.empty())
+                continue;
+            addNodes(l, allNodes, groupID, parse_set);
+        }
+        return 0;
+    }
+
     if(startsWith(link, "https://t.me/socks") || startsWith(link, "tg://socks"))
         linkType = ConfType::SOCKS;
     else if(startsWith(link, "https://t.me/http") || startsWith(link, "tg://http"))
         linkType = ConfType::HTTP;
-    else if(isLink(link) || startsWith(link, "surge:///install-config"))
+    else if(isLink(link) || startsWith(link, "surge:///install-config") ||
+            isMihomoScheme) // Mihomo node links go to SUB case for smart routing
         linkType = ConfType::SUB;
     else if(startsWith(link, "Netch://"))
         linkType = ConfType::Netch;
@@ -141,43 +171,161 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID, parse_
     switch(linkType)
     {
     case ConfType::SUB:
-        writeLog(LOG_TYPE_INFO, "Downloading subscription data...");
-        if(startsWith(link, "surge:///install-config")) //surge config link
-            link = urlDecode(getUrlArg(link, "url"));
-        
-        // Copy client headers if available (preserves client's original UA)
-        if(request_headers)
-            custom_headers = *request_headers;
+    {
+        // ========== Smart subscription/node link routing ==========
+        bool isSubscription = false;
+        bool isNodeLink = false;
 
-        // Override User-Agent if &ua= parameter is provided (highest priority)
-        if(parse_set.custom_user_agent && !parse_set.custom_user_agent->empty())
-            custom_headers["User-Agent"] = *parse_set.custom_user_agent;
+        // Rule 1: HTTP(S) links
+        if (startsWith(link, "http://") || startsWith(link, "https://")) {
+            size_t protocolEnd = link.find("://") + 3;
+            size_t pathStart = link.find("/", protocolEnd);
+            size_t queryStart = link.find("?", protocolEnd);
 
-        // Always pass &custom_headers (never nullptr) so webget.cpp can detect
-        // missing User-Agent and fall back to built-in UA via CURLOPT_USERAGENT
-        strSub = webGet(link, proxy, global.cacheSubscription, &extra_headers, &custom_headers, fetch_timeout);
-        /*
-        if(strSub.size() == 0)
-        {
-            //try to get it again with system proxy
-            writeLog(LOG_TYPE_WARN, "Cannot download subscription directly. Using system proxy.");
-            strProxy = getSystemProxy();
-            if(strProxy != "")
-            {
-                strSub = webGet(link, strProxy);
+            // Has query params = subscription
+            if (queryStart != link.npos) {
+                isSubscription = true;
             }
-            else
-                writeLog(LOG_TYPE_WARN, "No system proxy is set. Skipping.");
+            // Has actual path (not just trailing /) = subscription
+            else if (pathStart != link.npos) {
+                std::string path = link.substr(pathStart);
+                if (path.length() > 1) {
+                    isSubscription = true;
+                } else {
+                    // Single "/" = could be HTTP proxy node
+                    isNodeLink = true;
+                }
+            }
+            // No path, no params = HTTP proxy node
+            else {
+                isNodeLink = true;
+            }
         }
-        */
+        // Rule 2: No protocol header = treat as subscription
+        else if (link.find("://") == link.npos) {
+            isSubscription = true;
+            writeLog(LOG_TYPE_INFO, "Link without protocol detected, treating as subscription: " + link);
+        }
+        // Rule 3: Matches a supported mihomo scheme = node link
+        else {
+#ifdef USE_MIHOMO_PARSER
+            for (const auto &scheme : mihomo::SUPPORTED_SCHEMES) {
+                if (startsWith(link, scheme + "://")) {
+                    isNodeLink = true;
+                    break;
+                }
+            }
+#endif
+            // Rule 4: Other unknown protocols = feed to Mihomo parser
+            if (!isNodeLink) {
+                isNodeLink = true;
+                writeLog(LOG_TYPE_INFO, "Unknown protocol detected, feeding to Mihomo parser: " + link);
+            }
+        }
+
+        // Handle subscription links
+        if (isSubscription) {
+            if (parse_set.custom_user_agent &&
+                !parse_set.custom_user_agent->empty()) {
+                writeLog(LOG_TYPE_INFO, "Subscription URL detected but &ua= specified, downloading server-side with custom UA: " + link);
+            } else {
+                writeLog(LOG_TYPE_INFO, "Subscription URL detected, skipping download (will be used as proxy-provider): " + link);
+                return 0;
+            }
+        }
+
+        // Node links: parse directly without webGet
+        if (isNodeLink) {
+            writeLog(LOG_TYPE_INFO, "Node link detected, parsing with mihomo...");
+            strSub = link; // Use link directly as parse content
+        } else {
+            // Subscription: download first
+            writeLog(LOG_TYPE_INFO, "Downloading subscription data...");
+            if(startsWith(link, "surge:///install-config"))
+                link = urlDecode(getUrlArg(link, "url"));
+
+            if(request_headers)
+                custom_headers = *request_headers;
+
+            if(parse_set.custom_user_agent && !parse_set.custom_user_agent->empty())
+            {
+                custom_headers["User-Agent"] = *parse_set.custom_user_agent;
+            }
+
+            strSub = webGet(link, proxy, global.cacheSubscription, &extra_headers, &custom_headers, fetch_timeout);
+        }
+
         if(!strSub.empty())
         {
             writeLog(LOG_TYPE_INFO, "Parsing subscription data...");
-            if(explodeConfContent(strSub, nodes) == 0)
-            {
+
+#ifdef USE_MIHOMO_PARSER
+            // Use mihomo parser (100% compatible with mihomo)
+            try {
+                auto mihomo_nodes = mihomo::parseSubscription(strSub);
+
+                // Convert mihomo::ProxyNode to subconverter's Proxy structure
+                for (const auto &mnode : mihomo_nodes) {
+                    Proxy node;
+                    node.Remark = mnode.name;
+                    node.Type = getProxyTypeFromString(mnode.type);
+
+                    // Copy all raw params for generic pass-through
+                    for (const auto &[key, value] : mnode.params) {
+                        node.RawParams[key] = value;
+                    }
+
+                    // CRITICAL: Preserve original type string from mihomo
+                    node.RawParams["type"] = mnode.type;
+
+                    node.Hostname = mnode.server;
+                    node.Port = mnode.port;
+
+                    // Map known params to Proxy fields for backward compatibility
+                    for (const auto &[key, value] : mnode.params) {
+                        if (key == "password")
+                            node.Password = value;
+                        else if (key == "cipher" || key == "method")
+                            node.EncryptMethod = value;
+                        else if (key == "uuid")
+                            node.UserId = value;
+                        else if (key == "alterId")
+                            node.AlterId = std::stoi(value);
+                        else if (key == "udp")
+                            node.UDP = (value == "true");
+                        else if (key == "tls")
+                            node.TLSSecure = (value == "true");
+                        else if (key == "sni" || key == "servername")
+                            node.ServerName = value;
+                        else if (key == "network")
+                            node.TransferProtocol = value;
+                    }
+
+                    nodes.push_back(node);
+                }
+
+                if (nodes.empty()) {
+                    writeLog(LOG_TYPE_ERROR, "Mihomo parser returned no valid nodes from: '" + link + "'!");
+                    return -1;
+                }
+
+                writeLog(LOG_TYPE_INFO, "Mihomo parser successfully parsed " + std::to_string(nodes.size()) + " nodes.");
+            } catch (const std::exception &e) {
+                writeLog(LOG_TYPE_ERROR, "Mihomo parser error: " + std::string(e.what()) + ", falling back to legacy parser.");
+                // Fallback to legacy parser
+                if (explodeConfContent(strSub, nodes) == 0) {
+                    writeLog(LOG_TYPE_ERROR, "Invalid subscription: '" + link + "'!");
+                    return -1;
+                }
+            }
+#else
+            // Fallback when mihomo parser is not available
+            if (explodeConfContent(strSub, nodes) == 0) {
                 writeLog(LOG_TYPE_ERROR, "Invalid subscription: '" + link + "'!");
                 return -1;
             }
+#endif
+
             if(startsWith(strSub, "ssd://"))
             {
                 getSubInfoFromSSD(strSub, subInfo);
@@ -202,6 +350,7 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID, parse_
             return -1;
         }
         break;
+    }
     case ConfType::Local:
         if(!authorized)
             return -1;

@@ -43,6 +43,7 @@ ADD_EXECUTABLE(${BUILD_TARGET_NAME}
     src/handler/settings.cpp
     src/main.cpp
     src/parser/infoparser.cpp
+    src/parser/mihomo_bridge.cpp
     src/parser/subparser.cpp
     src/script/cron.cpp
     src/script/script_quickjs.cpp
@@ -105,6 +106,48 @@ TARGET_LINK_LIBRARIES(${BUILD_TARGET_NAME} ${QUICKJS_LIBRARIES})
 FIND_PACKAGE(LibCron REQUIRED)
 TARGET_INCLUDE_DIRECTORIES(${BUILD_TARGET_NAME} PRIVATE ${LIBCRON_INCLUDE_DIRS})
 TARGET_LINK_LIBRARIES(${BUILD_TARGET_NAME} ${LIBCRON_LIBRARIES})
+
+# Mihomo Go Parser Bridge
+# Supports c-shared (.so) and c-archive (.a) modes
+IF(EXISTS "${CMAKE_SOURCE_DIR}/bridge/libmihomo.so")
+    MESSAGE(STATUS "Found mihomo Go shared library (.so), enabling native parser support")
+    TARGET_INCLUDE_DIRECTORIES(${BUILD_TARGET_NAME} PRIVATE "${CMAKE_SOURCE_DIR}/bridge")
+    TARGET_COMPILE_DEFINITIONS(${BUILD_TARGET_NAME} PRIVATE USE_MIHOMO_PARSER)
+
+    # Link pthread (required by Go runtime on Linux)
+    IF(UNIX AND NOT APPLE)
+        TARGET_LINK_LIBRARIES(${BUILD_TARGET_NAME} pthread)
+    ENDIF()
+
+    # Dynamic library linking (no --whole-archive needed)
+    TARGET_LINK_LIBRARIES(${BUILD_TARGET_NAME} "${CMAKE_SOURCE_DIR}/bridge/libmihomo.so")
+
+ELSEIF(EXISTS "${CMAKE_SOURCE_DIR}/bridge/libmihomo.a")
+    MESSAGE(STATUS "Found mihomo Go static library (.a), enabling native parser support")
+    TARGET_INCLUDE_DIRECTORIES(${BUILD_TARGET_NAME} PRIVATE "${CMAKE_SOURCE_DIR}/bridge")
+    TARGET_COMPILE_DEFINITIONS(${BUILD_TARGET_NAME} PRIVATE USE_MIHOMO_PARSER)
+
+    # Link pthread BEFORE Go library (required by Go runtime)
+    IF(UNIX AND NOT APPLE)
+        TARGET_LINK_LIBRARIES(${BUILD_TARGET_NAME} pthread)
+
+        # Use --whole-archive to ensure Go symbols are fully pulled in (static lib only)
+        IF(USING_MUSL)
+            MESSAGE(STATUS "Using --whole-archive for Go library linking (musl mode)")
+            TARGET_LINK_LIBRARIES(${BUILD_TARGET_NAME}
+                "-Wl,--whole-archive"
+                "${CMAKE_SOURCE_DIR}/bridge/libmihomo.a"
+                "-Wl,--no-whole-archive"
+            )
+        ELSE()
+            TARGET_LINK_LIBRARIES(${BUILD_TARGET_NAME} "${CMAKE_SOURCE_DIR}/bridge/libmihomo.a")
+        ENDIF()
+    ELSE()
+        TARGET_LINK_LIBRARIES(${BUILD_TARGET_NAME} "${CMAKE_SOURCE_DIR}/bridge/libmihomo.a")
+    ENDIF()
+ELSE()
+    MESSAGE(WARNING "mihomo Go library not found, parser will use fallback mode")
+ENDIF()
 
 IF(WIN32)
     TARGET_LINK_LIBRARIES(${BUILD_TARGET_NAME} wsock32 ws2_32)
