@@ -24,6 +24,7 @@ RUN cd bridge && go get -u all
 RUN cd bridge && go mod tidy
 
 COPY scripts/ scripts/
+RUN mkdir -p src/parser
 RUN go run scripts/generate_schemes.go mihomo_schemes.h
 RUN go run scripts/generate_param_compat.go -o param_compat.h
 
