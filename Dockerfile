@@ -100,10 +100,10 @@ COPY . /src
 COPY --from=go-builder /build/src/parser/mihomo_schemes.h /src/src/parser/mihomo_schemes.h
 COPY --from=go-builder /build/src/parser/param_compat.h /src/src/parser/param_compat.h
 
-# Download latest header-only libraries
+# Download header-only libraries
 RUN set -xe && \
-    echo "Downloading latest cpp-httplib..." && \
-    curl -fsSL https://raw.githubusercontent.com/yhirose/cpp-httplib/master/httplib.h -o include/httplib.h && \
+    echo "Downloading cpp-httplib v0.14.3..." && \
+    curl -fsSL https://raw.githubusercontent.com/yhirose/cpp-httplib/v0.14.3/httplib.h -o include/httplib.h && \
     echo "Downloading latest nlohmann/json..." && \
     curl -fsSL https://github.com/nlohmann/json/releases/latest/download/json.hpp -o include/nlohmann/json.hpp && \
     echo "Downloading latest inja..." && \
