@@ -1,6 +1,7 @@
 #ifndef MIHOMO_BRIDGE_H_INCLUDED
 #define MIHOMO_BRIDGE_H_INCLUDED
 
+#include <cstdint>
 #include <map>
 #include <string>
 #include <vector>
