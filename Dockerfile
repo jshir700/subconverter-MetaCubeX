@@ -6,36 +6,36 @@ ARG TARGETVARIANT
 ARG MIHOMO_REF="Meta"
 ARG MIHOMO_CACHE_BUST=1
 
-WORKDIR /build/bridge
+WORKDIR /build
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends git build-essential && \
     rm -rf /var/lib/apt/lists/*
 
-COPY bridge/converter.go ./
+COPY bridge/converter.go bridge/
 
-RUN go mod init subconverter/bridge
+RUN cd bridge && go mod init subconverter/bridge
 
 RUN echo "MIHOMO_CACHE_BUST=$MIHOMO_CACHE_BUST" && \
-    go get github.com/metacubex/mihomo@${MIHOMO_REF}
+    cd bridge && go get github.com/metacubex/mihomo@${MIHOMO_REF}
 
-RUN go get -u all
+RUN cd bridge && go get -u all
 
-RUN go mod tidy
+RUN cd bridge && go mod tidy
 
-COPY scripts/ ../scripts/
-RUN go run ../scripts/generate_schemes.go mihomo_schemes.h
-RUN go run ../scripts/generate_param_compat.go -o param_compat.h
+COPY scripts/ scripts/
+RUN go run scripts/generate_schemes.go mihomo_schemes.h
+RUN go run scripts/generate_param_compat.go -o param_compat.h
 
 RUN echo "==> Building for $TARGETARCH with c-shared mode (musl compatible)" && \
-    CGO_ENABLED=1 \
+    cd bridge && CGO_ENABLED=1 \
     go build \
     -trimpath \
     -buildmode=c-shared \
     -o libmihomo.so \
     .
 
-RUN ls -lh libmihomo.so libmihomo.h
+RUN ls -lh bridge/libmihomo.so bridge/libmihomo.h
 
 # ========== C++ BUILD STAGE ==========
 FROM debian:latest AS builder
@@ -96,8 +96,8 @@ COPY --from=go-builder /build/bridge/go.sum /src/bridge/go.sum
 # Build subconverter from THIS repository source
 WORKDIR /src
 COPY . /src
-COPY --from=go-builder /build/bridge/mihomo_schemes.h /src/src/parser/mihomo_schemes.h
-COPY --from=go-builder /build/bridge/param_compat.h /src/src/parser/param_compat.h
+COPY --from=go-builder /build/src/parser/mihomo_schemes.h /src/src/parser/mihomo_schemes.h
+COPY --from=go-builder /build/src/parser/param_compat.h /src/src/parser/param_compat.h
 
 # Download latest header-only libraries
 RUN set -xe && \
