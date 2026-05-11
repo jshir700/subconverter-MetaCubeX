@@ -268,7 +268,7 @@ std::string rulesetToClashStr(YAML::Node &base_rule, std::vector<RulesetContent>
             }
 
             // Generate RULE-SET entry (client-side fetch via rule-provider)
-            output_content += "  - " + "RULE-SET," + rule_name + "," + rule_group + "\n";
+            output_content += "  - RULE-SET," + rule_name + "," + rule_group + "\n";
 
             // Build rule-provider YAML definition on base_rule
             base_rule["rule-providers"][rule_name]["type"] = "http";
