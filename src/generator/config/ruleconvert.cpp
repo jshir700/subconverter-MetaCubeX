@@ -5,6 +5,9 @@
 #include "utils/network.h"
 #include "utils/regexp.h"
 #include "utils/string.h"
+#include "utils/string_hash.h"
+#include "utils/urlencode.h"
+#include "utils/yamlcpp_extra.h"
 #include "utils/rapidjson_extra.h"
 #include "subexport.h"
 
@@ -203,11 +206,12 @@ void rulesetToClash(YAML::Node &base_rule, std::vector<RulesetContent> &ruleset_
 
 std::string rulesetToClashStr(YAML::Node &base_rule, std::vector<RulesetContent> &ruleset_content_array, bool overwrite_original_rules, bool new_field_name)
 {
-    std::string rule_group, retrieved_rules, strLine;
+    std::string rule_group, retrieved_rules, strLine, rule_name;
     std::stringstream strStrm;
     const std::string field_name = new_field_name ? "rules" : "Rule";
     std::string output_content = "\n" + field_name + ":\n";
     size_t total_rules = 0;
+    string_array provider_names; // track used rule-provider names for collision avoidance
 
     if(!overwrite_original_rules && base_rule[field_name].IsDefined())
     {
@@ -222,6 +226,67 @@ std::string rulesetToClashStr(YAML::Node &base_rule, std::vector<RulesetContent>
         if(global.maxAllowedRules && total_rules > global.maxAllowedRules)
             break;
         rule_group = x.rule_group;
+
+        // Handle provider mode for Clash-native rulesets with remote URLs
+        if(x.provider && !x.rule_path.empty() &&
+           (x.rule_type == RULESET_CLASH_DOMAIN || x.rule_type == RULESET_CLASH_IPCIDR || x.rule_type == RULESET_CLASH_CLASSICAL))
+        {
+            // Extract provider name from URL path (same logic as findFileName in templates.cpp)
+            string_size pos = x.rule_path.rfind('/');
+            if(pos == std::string::npos)
+            {
+                pos = x.rule_path.rfind('\\');
+                if(pos == std::string::npos)
+                    pos = 0;
+            }
+            string_size pos2 = x.rule_path.rfind('.');
+            if(pos2 < pos || pos2 == std::string::npos)
+                pos2 = x.rule_path.size();
+            rule_name = urlDecode(x.rule_path.substr(pos + 1, pos2 - pos - 1));
+            // Handle name collision
+            {
+                std::string old_rule_name = rule_name;
+                int idx = 2;
+                while(std::find(provider_names.begin(), provider_names.end(), rule_name) != provider_names.end())
+                    rule_name = old_rule_name + " " + std::to_string(idx++);
+            }
+            provider_names.emplace_back(rule_name);
+
+            // Determine rule-provider behavior from ruleset type
+            std::string behavior;
+            switch(x.rule_type)
+            {
+            case RULESET_CLASH_DOMAIN:
+                behavior = "domain";
+                break;
+            case RULESET_CLASH_IPCIDR:
+                behavior = "ipcidr";
+                break;
+            default:
+                behavior = "classical";
+                break;
+            }
+
+            // Generate RULE-SET entry (client-side fetch via rule-provider)
+            output_content += "  - " + "RULE-SET," + rule_name + "," + rule_group + "\n";
+
+            // Build rule-provider YAML definition on base_rule
+            base_rule["rule-providers"][rule_name]["type"] = "http";
+            base_rule["rule-providers"][rule_name]["behavior"] = behavior;
+            base_rule["rule-providers"][rule_name]["url"] = x.rule_path;
+            base_rule["rule-providers"][rule_name]["path"] = "./providers/" + std::to_string(hash_(x.rule_path)) + ".yaml";
+            if(x.update_interval > 0)
+                base_rule["rule-providers"][rule_name]["interval"] = x.update_interval;
+            if(!x.user_agent.empty())
+                base_rule["rule-providers"][rule_name]["header"]["User-Agent"].push_back(make_yaml_quoted_scalar(x.user_agent));
+            if(!x.proxy.empty())
+                base_rule["rule-providers"][rule_name]["proxy"] = x.proxy;
+
+            total_rules++;
+            continue;
+        }
+
+        // Original inline expansion logic (unchanged)
         retrieved_rules = x.rule_content.get();
         if(retrieved_rules.empty())
         {
