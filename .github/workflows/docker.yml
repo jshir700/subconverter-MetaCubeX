@@ -1,9 +1,7 @@
 name: Publish Docker Image
 on:
-  # push:
-  #   branches: [master]
   workflow_run:
-    workflows: ["Auto-merge Dependabot PRs"]
+    workflows: ["GitHub CI"]
     types:
       - completed
   workflow_dispatch:
@@ -17,6 +15,7 @@ env:
 
 jobs:
   build:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     strategy:
       matrix:
         include:
@@ -40,6 +39,26 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Checkout exact commit for workflow_run
+        if: github.event_name == 'workflow_run'
+        run: git checkout ${{ github.event.workflow_run.head_sha }}
+
+      - name: Check for Docker-relevant changes (workflow_run only)
+        id: check_docker_changes
+        if: github.event_name == 'workflow_run'
+        run: |
+          CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || echo "")
+          echo "Changed files: $CHANGED_FILES"
+          if echo "$CHANGED_FILES" | tr ' ' '\n' | grep -qE '^(src/|CMakeLists\.txt|Dockerfile|bridge/|\.github/workflows/docker\.yml)'; then
+            echo "changed=true" >> $GITHUB_OUTPUT
+          else
+            echo "changed=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Skip if no Docker-relevant changes
+        if: steps.check_docker_changes.outputs.changed == 'false'
+        run: echo "No Docker-relevant changes, skipping build" && exit 0
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
