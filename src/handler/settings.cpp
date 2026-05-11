@@ -248,7 +248,12 @@ void readRuleset(YAML::Node node, string_array &dest, bool scope_limit = true)
     importItems(dest, scope_limit);
 }
 
-void refreshRulesets(RulesetConfigs &ruleset_list, std::vector<RulesetContent> &ruleset_content_array)
+void refreshRulesets(RulesetConfigs &ruleset_list,
+                     std::vector<RulesetContent> &ruleset_content_array,
+                     const std::string &rules_provider,
+                     const std::string &rules_ua,
+                     const std::string &rules_proxy,
+                     const std::string &rules_interval)
 {
     eraseElements(ruleset_content_array);
     std::string rule_group, rule_url, rule_url_typed, interval;
@@ -258,13 +263,34 @@ void refreshRulesets(RulesetConfigs &ruleset_list, std::vector<RulesetContent> &
 
     for(RulesetConfig &x : ruleset_list)
     {
+        // Apply &rules-provider= global default for rulesets WITHOUT explicit ,provider=
+        // &rules-provider=true or non-false → generate rule-provider
+        // &rules-provider=false → inline expand
+        // No &rules-provider= → leave to &classic= behavior
+        if(!x.provider_explicit && !rules_provider.empty())
+        {
+            if(rules_provider != "false")
+            {
+                // &rules-provider=true or non-false: generate rule-provider (ignore &classic=)
+                x.Provider = true;
+                x.provider_override = true;
+                writeLog(0, "  -> Globally set to provider mode by &rules-provider for ruleset '" + x.Url + "' (no explicit ,provider=).", LOG_LEVEL_INFO);
+            }
+            else
+            {
+                // &rules-provider=false: inline expand (ignore &classic=)
+                x.Provider = false;
+                x.provider_override = true;
+                writeLog(0, "  -> Globally inlined by &rules-provider=false for ruleset '" + x.Url + "' (no explicit ,provider=).", LOG_LEVEL_INFO);
+            }
+        }
         rule_group = x.Group;
         rule_url = x.Url;
         std::string::size_type pos = x.Url.find("[]");
         if(pos != std::string::npos)
         {
             writeLog(0, "Adding rule '" + rule_url.substr(pos + 2) + "," + rule_group + "'.", LOG_LEVEL_INFO);
-            rc = {rule_group, "", "", RULESET_SURGE, std::async(std::launch::async, [=](){return rule_url.substr(pos);}), 0, x.UserAgent};
+            rc = {rule_group, "", "", RULESET_SURGE, std::async(std::launch::async, [=](){return rule_url.substr(pos);}), 0, "", "", false, false, false};
         }
         else
         {
@@ -277,7 +303,24 @@ void refreshRulesets(RulesetConfigs &ruleset_list, std::vector<RulesetContent> &
                 type = iter->second;
             }
             writeLog(0, "Updating ruleset url '" + rule_url + "' with group '" + rule_group + "'.", LOG_LEVEL_INFO);
-            rc = {rule_group, rule_url, rule_url_typed, type, fetchFileAsync(rule_url, proxy, global.cacheRuleset, true, global.asyncFetchRuleset, x.UserAgent), x.Interval, x.UserAgent};
+            // UA priority: per-rule ua= > &rules-ua= > nothing (global-ua does NOT affect rule-provider)
+            std::string effective_ua = x.UserAgent.empty()
+                ? (rules_ua.empty() ? "" : rules_ua)
+                : x.UserAgent;
+            // Proxy priority: per-rule proxy= > &rules-proxy= > nothing
+            std::string effective_proxy = x.Proxy.empty() ? rules_proxy : x.Proxy;
+            // Interval priority: per-rule interval= (effective value > 0) > &rules-interval= (effective value > 0) > x.Interval (from config trailing number, effective value > 0) > 43200
+            int per_rule_interval = x.Interval;
+            int rules_interval_int = to_int(rules_interval, -1);
+            int effective_interval = x.Interval;
+            if(per_rule_interval > 0)
+                effective_interval = per_rule_interval;
+            else if(rules_interval_int > 0)
+                effective_interval = rules_interval_int;
+            else
+                effective_interval = 43200;
+
+            rc = {rule_group, rule_url, rule_url_typed, type, fetchFileAsync(rule_url, proxy, global.cacheRuleset, true, global.asyncFetchRuleset, effective_ua), effective_interval, effective_ua, effective_proxy, x.Provider, x.provider_explicit, x.provider_override};
         }
         ruleset_content_array.emplace_back(std::move(rc));
     }

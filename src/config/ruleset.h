@@ -19,6 +19,10 @@ struct RulesetConfig
     String Url;
     Integer Interval = 86400;
     String UserAgent;
+    String Proxy;
+    bool Provider = false;
+    bool provider_explicit = false;
+    bool provider_override = false;
     bool operator==(const RulesetConfig &r) const
     {
         return Group == r.Group && Url == r.Url && Interval == r.Interval;

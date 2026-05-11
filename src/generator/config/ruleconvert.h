@@ -28,6 +28,10 @@ struct RulesetContent
     std::shared_future<std::string> rule_content;
     int update_interval = 0;
     std::string user_agent;
+    std::string proxy;
+    bool provider = false;
+    bool provider_explicit = false;
+    bool provider_override = false;
 };
 
 std::string convertRuleset(const std::string &content, int type);
