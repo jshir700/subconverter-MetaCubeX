@@ -949,6 +949,9 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
             groupID--;
         }
     }
+    urls = split(argUrl, "|");
+    // Remove empty urls
+    urls.erase(std::remove_if(urls.begin(), urls.end(), [](const std::string& str) { return str.empty(); }), urls.end());
     groupID = 0;
 
     // for Clash targets, distinguish between node links and subscription links
