@@ -721,8 +721,7 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
     ext.quanx_dev_id = !argDeviceID.empty() ? argDeviceID : global.quanXDevID;
     ext.enable_rule_generator = global.enableRuleGen;
     ext.overwrite_original_rules = global.overwriteOriginalRules;
-    if(!argExpandRulesets)
-        ext.managed_config_prefix = global.managedConfigPrefix;
+    ext.managed_config_prefix = global.managedConfigPrefix;
 
     /// load external configuration
     if(argExternalConfig.empty())

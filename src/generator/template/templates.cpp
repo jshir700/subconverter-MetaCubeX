@@ -321,6 +321,7 @@ int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &rulese
     std::map<std::string, std::string> ruleset_proxy;       // per-rule proxy for rule-provider
     string_array rules;
     int index = 0;
+    bool inline_expand = false;                             // true when provider=false for SURGE-type rulesets
 
     if(!overwrite_original_rules && base_rule["rules"].IsDefined())
         rules = safe_as<string_array>(base_rule["rules"]);
@@ -417,6 +418,7 @@ int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &rulese
                 groups.emplace_back(rule_name);
                 continue;
             }
+            bool ruleset_inline_expand = false;
             if(!remote_path_prefix.empty())
             {
                 if(fileExist(rule_path, true) || isLink(rule_path))
@@ -457,6 +459,9 @@ int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &rulese
                         names.erase(rule_name);
                         rule_type.erase(rule_name);
                         ruleset_interval.erase(rule_name);
+                        ruleset_user_agent.erase(rule_name);
+                        ruleset_proxy.erase(rule_name);
+                        ruleset_inline_expand = true;
                         // fall through to inline expansion code below
                     }
                     // No explicit ,provider=: check &rules-provider= global override
@@ -474,6 +479,9 @@ int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &rulese
                         names.erase(rule_name);
                         rule_type.erase(rule_name);
                         ruleset_interval.erase(rule_name);
+                        ruleset_user_agent.erase(rule_name);
+                        ruleset_proxy.erase(rule_name);
+                        ruleset_inline_expand = true;
                         // fall through to inline expansion code below
                     }
                     // No ,provider= and no &rules-provider=: default → generate rule-provider
@@ -512,7 +520,18 @@ int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &rulese
                 if(!lineSize || strLine[0] == ';' || strLine[0] == '#' || (lineSize >= 2 && strLine[0] == '/' && strLine[1] == '/')) //empty lines and comments are ignored
                     continue;
 
-                if(startsWith(strLine, "DOMAIN-KEYWORD,"))
+                if(ruleset_inline_expand && !script)
+                {
+                    // Inline expansion mode: add ALL rule types directly into the rules list.
+                    // No RULE-SET entries are generated; all rules are expanded inline.
+                    strLine = trimWhitespace(strLine, true, true);
+                    if(strLine.empty()) continue;
+                    strLine += "," + rule_group;
+                    if(count_least(strLine, ',', 3))
+                        strLine = regReplace(strLine, "^(.*?,.*?)(,.*)(,.*)$", "$1$3$2");
+                    rules.emplace_back(std::move(strLine));
+                }
+                else if(startsWith(strLine, "DOMAIN-KEYWORD,"))
                 {
                     if(script)
                     {
@@ -549,19 +568,24 @@ int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &rulese
                         has_no_resolve = true;
                 }
             }
-            if(has_domain[rule_name] && !script)
-                rules.emplace_back("RULE-SET," + rule_name + " (Domain)," + rule_group);
-            if(has_ipcidr[rule_name] && !script)
+            // In inline expansion mode: skip RULE-SET generation and groups
+            // (all rules were already added inline in the while loop above)
+            if(!ruleset_inline_expand)
             {
-                if(has_no_resolve)
-                    rules.emplace_back("RULE-SET," + rule_name + " (IP-CIDR)," + rule_group + ",no-resolve");
-                else
-                    rules.emplace_back("RULE-SET," + rule_name + " (IP-CIDR)," + rule_group);
+                if(has_domain[rule_name] && !script)
+                    rules.emplace_back("RULE-SET," + rule_name + " (Domain)," + rule_group);
+                if(has_ipcidr[rule_name] && !script)
+                {
+                    if(has_no_resolve)
+                        rules.emplace_back("RULE-SET," + rule_name + " (IP-CIDR)," + rule_group + ",no-resolve");
+                    else
+                        rules.emplace_back("RULE-SET," + rule_name + " (IP-CIDR)," + rule_group);
+                }
+                if(!has_domain[rule_name] && !has_ipcidr[rule_name] && !script)
+                    rules.emplace_back("RULE-SET," + rule_name + "," + rule_group);
+                if(std::find(groups.begin(), groups.end(), rule_name) == groups.end())
+                    groups.emplace_back(rule_name);
             }
-            if(!has_domain[rule_name] && !has_ipcidr[rule_name] && !script)
-                rules.emplace_back("RULE-SET," + rule_name + "," + rule_group);
-            if(std::find(groups.begin(), groups.end(), rule_name) == groups.end())
-                groups.emplace_back(rule_name);
         }
     }
     for(std::string &x : groups)
