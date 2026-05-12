@@ -51,7 +51,6 @@ struct extra_settings
     tribool tfo = tribool();
     tribool skip_cert_verify = tribool();
     tribool tls13 = tribool();
-    bool clash_classical_ruleset = false;
     std::string sort_script;
     std::string clash_proxies_style = "flow";
     std::string clash_proxy_groups_style = "flow";

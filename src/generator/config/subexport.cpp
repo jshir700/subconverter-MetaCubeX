@@ -3,6 +3,7 @@
 #include <numeric>
 #include <cmath>
 #include <climits>
+#include <unordered_set>
 
 #include "config/regmatch.h"
 #include "generator/config/subexport.h"
@@ -800,6 +801,73 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode, const ProxyGr
     else
         yamlnode["Proxy"] = proxies;
 
+    // Generate proxy-providers section (before proxy-groups)
+    if(ext.use_proxy_provider && !ext.providers.empty()) {
+        YAML::Node provider_node;
+
+        // Build set of known proxy/provider/group names for existence validation
+        std::unordered_set<std::string> known_proxies;
+        for(const Proxy &node : nodes) {
+            known_proxies.insert(node.Remark);
+        }
+        for(const ProxyProvider &pp : ext.providers) {
+            known_proxies.insert(pp.name);
+        }
+        for(const ProxyGroupConfig &pg : extra_proxy_group) {
+            known_proxies.insert(pg.Name);
+            for(const std::string &proxy_name : pg.Proxies) {
+                known_proxies.insert(proxy_name);
+            }
+            for(const std::string &provider_name : pg.UsingProvider) {
+                known_proxies.insert("provider:" + provider_name);
+            }
+        }
+
+        for(const ProxyProvider &p : ext.providers) {
+            YAML::Node single_provider;
+            single_provider["type"] = "http";
+            single_provider["url"] = p.url;
+            single_provider["interval"] = p.interval;
+            // Only write proxy: field if the proxy name exists in known proxies/groups
+            if(!p.proxy.empty() && known_proxies.find(p.proxy) != known_proxies.end())
+                single_provider["proxy"] = p.proxy;
+            else if(!p.proxy.empty())
+                writeLog(0, "  -> Skipping proxy field for provider '" + p.name + "': proxy '" + p.proxy + "' not found in known proxies/proxy-groups.", LOG_LEVEL_INFO);
+            single_provider["path"] = p.path;
+            if(!p.user_agent.empty()) {
+                single_provider["header"]["User-Agent"].push_back(YAML::Load("\"" + p.user_agent + "\""));
+            }
+            if(!p.filter.empty()) {
+                single_provider["filter"] = p.filter;
+            }
+            if(!p.exclude_filter.empty()) {
+                single_provider["exclude-filter"] = p.exclude_filter;
+            }
+            single_provider["health-check"]["enable"] = true;
+            single_provider["health-check"]["url"] = "https://cp.cloudflare.com/generate_204";
+            single_provider["health-check"]["interval"] = 300;
+
+            // Add override config (if user specified udp or scv)
+            bool has_override = false;
+            YAML::Node override_node;
+            if(!ext.skip_cert_verify.is_undef()) {
+                override_node["skip-cert-verify"] = ext.skip_cert_verify.get();
+                has_override = true;
+            }
+            if(!ext.udp.is_undef()) {
+                override_node["udp"] = ext.udp.get();
+                has_override = true;
+            }
+            if(has_override) {
+                single_provider["override"] = override_node;
+            }
+
+            provider_node[p.name] = single_provider;
+        }
+
+        yamlnode["proxy-providers"] = provider_node;
+        writeLog(0, "Generated " + std::to_string(ext.providers.size()) + " proxy providers.", LOG_LEVEL_INFO);
+    }
 
     for(const ProxyGroupConfig &x : extra_proxy_group)
     {
@@ -842,15 +910,45 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode, const ProxyGr
         for(const auto& y : x.Proxies)
             groupGenerate(y, nodelist, filtered_nodelist, true, ext);
 
-        if(!x.UsingProvider.empty())
+        // Generate use: references for proxy-provider mode when proxies contain regex patterns
+        if(ext.use_proxy_provider && !ext.providers.empty()) {
+            bool has_regex = false;
+            std::string regex_pattern;
+            for(const auto &proxy : x.Proxies) {
+                if(!proxy.empty() && proxy[0] != '[' && proxy != "DIRECT" && proxy != "REJECT") {
+                    has_regex = true;
+                    regex_pattern = proxy;
+                    break;
+                }
+            }
+            if(has_regex && !regex_pattern.empty()) {
+                YAML::Node use_node(YAML::NodeType::Sequence);
+                for(const ProxyProvider &p : ext.providers) {
+                    if(p.groupId >= 0) {
+                        use_node.push_back(p.name);
+                    }
+                }
+                if(use_node.size() > 0) {
+                    singlegroup["use"] = use_node;
+                }
+                singlegroup["filter"] = regex_pattern;
+            }
+        }
+
+        if(!x.UsingProvider.empty() && !singlegroup["use"].IsDefined())
             singlegroup["use"] = x.UsingProvider;
-        else
-        {
-            if(filtered_nodelist.empty())
+        else {
+            if(filtered_nodelist.empty() && !ext.use_proxy_provider)
                 filtered_nodelist.emplace_back("DIRECT");
         }
         if(!filtered_nodelist.empty())
             singlegroup["proxies"] = filtered_nodelist;
+        
+        // Safety check: ensure group always has 'use' or 'proxies'
+        if(!singlegroup["use"].IsDefined() && !singlegroup["proxies"].IsDefined()) {
+            filtered_nodelist.emplace_back("DIRECT");
+            singlegroup["proxies"] = filtered_nodelist;
+        }
         if(group_block)
             singlegroup.SetStyle(YAML::EmitterStyle::Block);
         else
@@ -917,7 +1015,7 @@ std::string proxyToClash(std::vector<Proxy> &nodes, const std::string &base_conf
                 yamlnode["mode"] = ext.clash_script ? "Script" : "Rule";
         }
 
-        renderClashScript(yamlnode, ruleset_content_array, ext.managed_config_prefix, ext.clash_script, ext.overwrite_original_rules, ext.clash_classical_ruleset);
+        renderClashScript(yamlnode, ruleset_content_array, ext.managed_config_prefix, ext.clash_script, ext.overwrite_original_rules);
         return YAML::Dump(yamlnode);
     }
 

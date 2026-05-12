@@ -307,7 +307,7 @@ std::string findFileName(const std::string &path)
     return path.substr(pos + 1, pos2 - pos - 1);
 }
 
-int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &ruleset_content_array, const std::string &remote_path_prefix, bool script, bool overwrite_original_rules, bool clash_classical_ruleset)
+int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &ruleset_content_array, const std::string &remote_path_prefix, bool script, bool overwrite_original_rules)
 {
     nlohmann::json data;
     std::string match_group, geoips, retrieved_rules;
@@ -432,15 +432,15 @@ int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &rulese
                     ruleset_interval[rule_name] = x.update_interval;
                     if(!x.user_agent.empty())
                         ruleset_user_agent[rule_name] = x.user_agent;
-                    // Priority chain (inverted from old inline= semantics):
-                    // 1. x.provider_explicit → per-rule ,provider= (ignores &rules-provider= and &classic=)
+                    // Priority chain:
+                    // 1. x.provider_explicit → per-rule ,provider= (ignores &rules-provider=)
                     //    - x.provider=true  → generate rule-provider
                     //    - x.provider=false → inline expand
-                    // 2. x.provider_override → &rules-provider= global was applied (ignores &classic=)
+                    // 2. x.provider_override → &rules-provider= global was applied
                     //    - x.provider=true  → generate rule-provider
                     //    - x.provider=false → inline expand
-                    // 3. clash_classical_ruleset → generate rule-provider (legacy &classic= behavior)
-                    // 4. default → inline expand
+                    // 3. default (no ,provider=, no &rules-provider=) → generate rule-provider
+                    //    (replaces legacy &classic= behavior)
                     if(x.provider_explicit)
                     {
                         // Per-rule ,provider= explicitly set
@@ -462,7 +462,6 @@ int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &rulese
                     // No explicit ,provider=: check &rules-provider= global override
                     else if(x.provider_override)
                     {
-                        // &rules-provider= was applied in refreshRulesets (ignores &classic=)
                         if(x.provider)
                         {
                             if(!script)
@@ -477,23 +476,14 @@ int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &rulese
                         ruleset_interval.erase(rule_name);
                         // fall through to inline expansion code below
                     }
-                    // No ,provider= and no &rules-provider=: fall back to &classic= legacy behavior
-                    else if(clash_classical_ruleset)
+                    // No ,provider= and no &rules-provider=: default → generate rule-provider
+                    // This replaces the legacy &classic= parameter which has been removed.
+                    else
                     {
                         if(!script)
                             rules.emplace_back("RULE-SET," + rule_name + "," + rule_group);
                         groups.emplace_back(rule_name);
                         continue;
-                    }
-                    else
-                    {
-                        // classic=false (or not set): inline expand
-                        // clear intermediate state to avoid generating rule-provider entries in the for(groups) loop
-                        urls.erase(rule_name);
-                        names.erase(rule_name);
-                        rule_type.erase(rule_name);
-                        ruleset_interval.erase(rule_name);
-                        // fall through to inline expansion code below
                     }
                 }
                 else

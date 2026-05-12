@@ -335,43 +335,20 @@ inline std::string generateProviderHash(const std::string &url) {
     return shortHash;
 }
 
-// Parse ^ua=, ^proxy=, ^provider=, ^interval= fragment parameters from a URL
-static void parseUrlFragmentParams(const std::string &input,
-                                    std::string &ua,
-                                    std::string &proxy,
-                                    bool &provider,
-                                    bool &provider_explicit,
-                                    std::string &interval,
-                                    bool &interval_explicit,
-                                    std::string &clean_url) {
-    clean_url = input;
-    provider = false;
-    provider_explicit = false;
-    interval.clear();
-    interval_explicit = false;
-
-    size_t caret_pos = input.find('^');
-    if (caret_pos == input.npos)
-        return;
-
-    std::string fragment = input.substr(caret_pos + 1);
-    clean_url = input.substr(0, caret_pos);
-
-    string_array parts = split(fragment, "&");
-    for (const std::string &part : parts) {
-        if (startsWith(part, "ua=")) {
-            ua = part.substr(3);
-        } else if (startsWith(part, "proxy=")) {
-            proxy = part.substr(6);
-        } else if (startsWith(part, "provider=")) {
-            std::string val = part.substr(9);
-            provider = (val != "false");
-            provider_explicit = true;
-        } else if (startsWith(part, "interval=")) {
-            interval = part.substr(9);
-            interval_explicit = true;
-        }
+// Check if a proxy/group name exists in the config (built-in + custom proxy groups)
+static bool proxyExistsInConfig(const std::string &name, const ProxyGroupConfigs &groups) {
+    if(name.empty())
+        return false;
+    static const std::unordered_set<std::string> builtins = {
+        "DIRECT", "REJECT", "REJECT-TG", "PASS", "COMPATIBLE"
+    };
+    if(builtins.count(name))
+        return true;
+    for(const auto &g : groups) {
+        if(g.Name == name)
+            return true;
     }
+    return false;
 }
 
 struct TaggedLink {
@@ -646,7 +623,7 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
     tribool argSort = getUrlArg(argument, "sort"), argUseSortScript = getUrlArg(argument, "sort_script");
     tribool argGenClashScript = getUrlArg(argument, "script"), argEnableInsert = getUrlArg(argument, "insert");
     tribool argSkipCertVerify = getUrlArg(argument, "scv"), argFilterDeprecated = getUrlArg(argument, "fdn"), argExpandRulesets = getUrlArg(argument, "expand"), argAppendUserinfo = getUrlArg(argument, "append_info");
-    tribool argPrependInsert = getUrlArg(argument, "prepend"), argGenClassicalRuleProvider = getUrlArg(argument, "classic"), argTLS13 = getUrlArg(argument, "tls13");
+    tribool argPrependInsert = getUrlArg(argument, "prepend"), argTLS13 = getUrlArg(argument, "tls13");
 
     std::string base_content, output_content;
     ProxyGroupConfigs lCustomProxyGroups = global.customProxyGroups;
@@ -734,7 +711,6 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
     ext.filter_deprecated = argFilterDeprecated.get(global.filterDeprecated);
     ext.clash_new_field_name = argClashNewField.get(global.clashUseNewField);
     ext.clash_script = argGenClashScript.get();
-    ext.clash_classical_ruleset = argGenClassicalRuleProvider.get();
     if(!argExpandRulesets)
         ext.clash_new_field_name = true;
     else
@@ -949,7 +925,7 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
             groupID--;
         }
     }
-    urls = split(argUrl, "|");
+    urls = split(argUrl, "||");
     // Remove empty urls
     urls.erase(std::remove_if(urls.begin(), urls.end(), [](const std::string& str) { return str.empty(); }), urls.end());
     groupID = 0;
@@ -973,6 +949,15 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
 
         for(std::string &x : urls) {
             x = regTrim(x);
+            
+            // Check for inline parameters (|key:val;key:val format — no encoding needed)
+            std::string inline_params;
+            size_t pipe_pos = x.find('|');
+            if(pipe_pos != std::string::npos) {
+                inline_params = x.substr(pipe_pos + 1);
+                x = x.substr(0, pipe_pos);
+            }
+            
             TaggedLink tagged = parseTaggedLink(x);
             std::string link = tagged.link.empty() ? x : tagged.link;
 
@@ -991,11 +976,34 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
                 writeLog(0, "Detected node link: '" + link + "', will parse directly.", LOG_LEVEL_INFO);
                 node_urls.push_back(node_link);
             } else if(isLink(link)) {
-                std::string clean_link, per_url_ua, per_url_proxy, per_url_interval;
+                std::string per_url_ua, per_url_proxy, per_url_interval;
                 bool per_url_provider_mode = false, per_url_provider_explicit = false, per_url_interval_explicit = false;
-                parseUrlFragmentParams(link, per_url_ua, per_url_proxy, per_url_provider_mode, per_url_provider_explicit,
-                                       per_url_interval, per_url_interval_explicit, clean_link);
-                writeLog(0, "Detected subscription link: '" + clean_link + "'.", LOG_LEVEL_INFO);
+                
+                // Parse inline parameters (|key:val;key:val)
+                if(!inline_params.empty()) {
+                    string_array parts = split(inline_params, ";");
+                    for(const std::string &part : parts) {
+                        if(part.empty()) continue;
+                        size_t colon_pos = part.find(':');
+                        if(colon_pos == std::string::npos) continue;
+                        std::string key = part.substr(0, colon_pos);
+                        std::string val = part.substr(colon_pos + 1);
+                        
+                        if(key == "ua") {
+                            per_url_ua = val;
+                        } else if(key == "proxy") {
+                            per_url_proxy = val;
+                        } else if(key == "provider") {
+                            per_url_provider_mode = (val != "false");
+                            per_url_provider_explicit = true;
+                        } else if(key == "interval") {
+                            per_url_interval = val;
+                            per_url_interval_explicit = true;
+                        }
+                    }
+                }
+                
+                writeLog(0, "Detected subscription link: '" + link + "'.", LOG_LEVEL_INFO);
                 if(!per_url_ua.empty())
                     writeLog(0, "  -> per-URL ua: '" + per_url_ua + "'", LOG_LEVEL_INFO);
                 if(!per_url_proxy.empty())
@@ -1009,7 +1017,7 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
                         writeLog(0, "  -> inline mode (server-side fetch).", LOG_LEVEL_INFO);
                 }
                 subscription_urls.push_back(
-                    {clean_link, tagged.tag, tagged.provider,
+                    {link, tagged.tag, tagged.provider,
                      per_url_ua, per_url_proxy, per_url_interval,
                      per_url_provider_mode, per_url_provider_explicit,
                      per_url_interval_explicit, tagged.link_decoded});
@@ -1027,20 +1035,20 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
         for(const auto &item : subscription_urls) {
             if(item.provider_explicit) {
                 if(item.provider_mode) {
-                    writeLog(0, "  -> Explicit provider mode (^provider=true) for subscription '" + item.url + "'.", LOG_LEVEL_INFO);
+                    writeLog(0, "  -> Explicit provider mode for subscription '" + item.url + "'.", LOG_LEVEL_INFO);
                     provider_subs.push_back(item);
                 } else {
-                    writeLog(0, "  -> Explicit inline mode (^provider=false) for subscription '" + item.url + "'.", LOG_LEVEL_INFO);
+                    writeLog(0, "  -> Explicit inline mode for subscription '" + item.url + "'.", LOG_LEVEL_INFO);
                     inline_subs.push_back(item);
                 }
             } else {
                 if(argProxysProvider.empty()) {
                     provider_subs.push_back(item);
                 } else if(argProxysProvider != "false") {
-                    writeLog(0, "  -> Globally set to provider mode by &proxys-provider for subscription '" + item.url + "' (no explicit ^provider=).", LOG_LEVEL_INFO);
+                    writeLog(0, "  -> Globally set to provider mode by &proxys-provider for subscription '" + item.url + "'.", LOG_LEVEL_INFO);
                     provider_subs.push_back(item);
                 } else {
-                    writeLog(0, "  -> Globally inlined by &proxys-provider=false for subscription '" + item.url + "' (no explicit ^provider=).", LOG_LEVEL_INFO);
+                    writeLog(0, "  -> Globally inlined by &proxys-provider=false for subscription '" + item.url + "'.", LOG_LEVEL_INFO);
                     inline_subs.push_back(item);
                 }
             }
@@ -1053,6 +1061,10 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
                 std::string fetch_ua = item.ua.empty()
                     ? (argProxysUA.empty() ? global.user_agent : argProxysUA)
                     : item.ua;
+
+                // Ensure a non-empty UA so addNodes() doesn't skip subscription download
+                if(fetch_ua.empty())
+                    fetch_ua = "subconverter-inline-fetch";
 
                 std::string saved_ua;
                 if(parse_set.custom_user_agent) {
@@ -1118,7 +1130,7 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
                 provider.tag = item.tag;
                 writeLog(0, "Generated provider: " + provider.name + " for URL: " + item.url, LOG_LEVEL_INFO);
                 provider.url = item.url_decoded ? item.url : urlDecode(item.url);
-                // UA priority: ^ua= > &proxys-ua= > no UA (global-ua does NOT affect proxy-provider)
+                // UA priority: per-URL ua (|ua:X) > &proxys-ua= > no UA (global-ua does NOT affect proxy-provider)
                 if(!item.ua.empty()) {
                     provider.user_agent = item.ua;
                     writeLog(0, "  -> Using per-URL ua for provider '" + provider.name + "': '" + item.ua + "'", LOG_LEVEL_INFO);
@@ -1128,7 +1140,7 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
                 } else {
                     provider.user_agent = "";
                 }
-                // Interval priority: ^interval= (valid int) > &proxys-interval= (valid int) > 43200
+                // Interval priority: per-URL interval (|interval:X) > &proxys-interval= (valid int) > 43200
                 int per_url_interval = to_int(item.interval, -1);
                 int global_interval = to_int(argProxysInterval, -1);
                 if(item.interval_explicit && per_url_interval > 0) {
@@ -1150,13 +1162,24 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
                 if(!argExcludeRemark.empty() && regValid(argExcludeRemark)) {
                     provider.exclude_filter = argExcludeRemark;
                 }
-                // Proxy priority: ^proxy= > &proxys-proxy= > none
+                // Proxy priority with existence check: per-URL proxy (|proxy:X) > &proxys-proxy= (if in config) > none
                 if(!item.proxy.empty()) {
-                    provider.proxy = item.proxy;
-                    writeLog(0, "  -> Using per-URL proxy for provider '" + provider.name + "': '" + item.proxy + "'", LOG_LEVEL_INFO);
+                    if(proxyExistsInConfig(item.proxy, lCustomProxyGroups)) {
+                        provider.proxy = item.proxy;
+                        writeLog(0, "  -> Using per-URL proxy for provider '" + provider.name + "': '" + item.proxy + "'", LOG_LEVEL_INFO);
+                    } else if(!argProxysProxy.empty() && proxyExistsInConfig(argProxysProxy, lCustomProxyGroups)) {
+                        provider.proxy = argProxysProxy;
+                        writeLog(0, "  -> Per-URL proxy '" + item.proxy + "' not found in config, falling back to &proxys-proxy for provider '" + provider.name + "': '" + argProxysProxy + "'", LOG_LEVEL_INFO);
+                    } else {
+                        writeLog(0, "  -> Per-URL proxy '" + item.proxy + "' not found in config, no valid fallback for provider '" + provider.name + "'.", LOG_LEVEL_WARNING);
+                    }
                 } else if(!argProxysProxy.empty()) {
-                    provider.proxy = argProxysProxy;
-                    writeLog(0, "  -> Using global &proxys-proxy for provider '" + provider.name + "': '" + argProxysProxy + "'", LOG_LEVEL_INFO);
+                    if(proxyExistsInConfig(argProxysProxy, lCustomProxyGroups)) {
+                        provider.proxy = argProxysProxy;
+                        writeLog(0, "  -> Using global &proxys-proxy for provider '" + provider.name + "': '" + argProxysProxy + "'", LOG_LEVEL_INFO);
+                    } else {
+                        writeLog(0, "  -> Global &proxys-proxy '" + argProxysProxy + "' not found in config for provider '" + provider.name + "'.", LOG_LEVEL_WARNING);
+                    }
                 }
 
                 ext.providers.push_back(provider);
@@ -1500,6 +1523,30 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
         return "Unrecognized target";
     }
     writeLog(0, "Generate completed.", LOG_LEVEL_INFO);
+    // &global-ua= injects/overwrites global-ua: line in final output (highest priority)
+    if(!argGlobalUA.empty()) {
+        std::string ua_key = "global-ua:";
+        size_t ua_pos = output_content.find(ua_key);
+        std::string ua_line = "global-ua: " + argGlobalUA;
+        if(ua_pos != std::string::npos) {
+            size_t line_end = output_content.find('\n', ua_pos);
+            size_t len = (line_end != std::string::npos) ? (line_end - ua_pos) : (output_content.size() - ua_pos);
+            output_content.replace(ua_pos, len, ua_line);
+            writeLog(0, "Replaced existing global-ua line with &global-ua value: '" + argGlobalUA + "'", LOG_LEVEL_INFO);
+        } else {
+            std::string inject_line = ua_line + "\n";
+            if(output_content.find("---") == 0) {
+                size_t first_nl = output_content.find('\n');
+                if(first_nl != std::string::npos)
+                    output_content.insert(first_nl + 1, inject_line);
+                else
+                    output_content = inject_line + output_content;
+            } else {
+                output_content = inject_line + output_content;
+            }
+            writeLog(0, "Injected global-ua line with &global-ua value: '" + argGlobalUA + "'", LOG_LEVEL_INFO);
+        }
+    }
     if(!argFilename.empty())
         response.headers.emplace("Content-Disposition", "attachment; filename=\"" + argFilename + "\"; filename*=utf-8''" + urlEncode(argFilename));
     return output_content;

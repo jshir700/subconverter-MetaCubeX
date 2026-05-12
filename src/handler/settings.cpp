@@ -248,6 +248,22 @@ void readRuleset(YAML::Node node, string_array &dest, bool scope_limit = true)
     importItems(dest, scope_limit);
 }
 
+// Check if a proxy/group name exists in the config (built-in + custom proxy groups)
+static bool proxyExistsInConfig(const std::string &name, const ProxyGroupConfigs &groups) {
+    if(name.empty())
+        return false;
+    static const std::unordered_set<std::string> builtins = {
+        "DIRECT", "REJECT", "REJECT-TG", "PASS", "COMPATIBLE"
+    };
+    if(builtins.count(name))
+        return true;
+    for(const auto &g : groups) {
+        if(g.Name == name)
+            return true;
+    }
+    return false;
+}
+
 void refreshRulesets(RulesetConfigs &ruleset_list,
                      std::vector<RulesetContent> &ruleset_content_array,
                      const std::string &rules_provider,
@@ -307,8 +323,24 @@ void refreshRulesets(RulesetConfigs &ruleset_list,
             std::string effective_ua = x.UserAgent.empty()
                 ? (rules_ua.empty() ? "" : rules_ua)
                 : x.UserAgent;
-            // Proxy priority: per-rule proxy= > &rules-proxy= > nothing
-            std::string effective_proxy = x.Proxy.empty() ? rules_proxy : x.Proxy;
+            // Proxy priority with existence check: per-rule proxy= (if in config) > &rules-proxy= (if in config) > nothing
+            std::string effective_proxy;
+            if(!x.Proxy.empty()) {
+                if(proxyExistsInConfig(x.Proxy, global.customProxyGroups)) {
+                    effective_proxy = x.Proxy;
+                } else if(!rules_proxy.empty() && proxyExistsInConfig(rules_proxy, global.customProxyGroups)) {
+                    effective_proxy = rules_proxy;
+                    writeLog(0, "  -> Per-rule proxy '" + x.Proxy + "' not found in config, falling back to &rules-proxy for ruleset '" + rule_url + "': '" + rules_proxy + "'", LOG_LEVEL_INFO);
+                } else {
+                    writeLog(0, "  -> Per-rule proxy '" + x.Proxy + "' not found in config, no valid fallback for ruleset '" + rule_url + "'.", LOG_LEVEL_WARNING);
+                }
+            } else if(!rules_proxy.empty()) {
+                if(proxyExistsInConfig(rules_proxy, global.customProxyGroups)) {
+                    effective_proxy = rules_proxy;
+                } else {
+                    writeLog(0, "  -> &rules-proxy '" + rules_proxy + "' not found in config for ruleset '" + rule_url + "'.", LOG_LEVEL_WARNING);
+                }
+            }
             // Interval priority: per-rule interval= (effective value > 0) > &rules-interval= (effective value > 0) > x.Interval (from config trailing number, effective value > 0) > 43200
             int per_rule_interval = x.Interval;
             int rules_interval_int = to_int(rules_interval, -1);

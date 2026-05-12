@@ -17,7 +17,7 @@ struct RulesetConfig
     String Group;
     //RulesetType Type = RulesetType::SurgeRuleset;
     String Url;
-    Integer Interval = 86400;
+    Integer Interval = 0;
     String UserAgent;
     String Proxy;
     bool Provider = false;

@@ -135,7 +135,7 @@ namespace toml
                 throw serialization_error(format_error("Ruleset has unsupported type!", v.at("type").location(), "should be one of following: surge-ruleset, quantumultx, clash-domain, clash-ipcidr, clash-classic"), v.at("type").location());
             }
             conf.Url += find<String>(v, "ruleset");
-            conf.Interval = find_or<Integer>(v, "interval", 86400);
+            conf.Interval = find_or<Integer>(v, "interval", 0);
             conf.UserAgent = find_or<String>(v, "ua", "");
             conf.Proxy = find_or<String>(v, "proxy", "");
             conf.Provider = find_or<bool>(v, "provider", false);
