@@ -137,6 +137,7 @@ void matchUserAgent(const std::string &user_agent, std::string &target, tribool 
 std::string getRuleset(RESPONSE_CALLBACK_ARGS)
 {
     auto &argument = request.argument;
+    tribool argDedup = getUrlArg(argument, "dedup");
     int *status_code = &response.status_code;
     /// type: 1 for Surge, 2 for Quantumult X, 3 for Clash domain rule-provider, 4 for Clash ipcidr rule-provider, 5 for Surge DOMAIN-SET, 6 for Clash classical ruleset
     std::string url = urlSafeBase64Decode(getUrlArg(argument, "url")), type = getUrlArg(argument, "type"), group = urlSafeBase64Decode(getUrlArg(argument, "group"));
@@ -220,6 +221,7 @@ std::string getRuleset(RESPONSE_CALLBACK_ARGS)
         return 0;
     };
 
+    std::unordered_set<std::string> seenRules;
     lineSize = output_content.size();
     output_content.clear();
     output_content.reserve(lineSize);
@@ -277,6 +279,38 @@ std::string getRuleset(RESPONSE_CALLBACK_ARGS)
         case 6:
             if(!std::any_of(ClashRuleTypes.begin(), ClashRuleTypes.end(), [&strLine](const std::string& type){return startsWith(strLine, type);}))
                 continue;
+            {
+                string_size dpos = strLine.find(',');
+                if(dpos != std::string::npos) {
+                    string_size dpos2 = strLine.find(',', dpos + 1);
+                    if(dpos2 != std::string::npos) {
+                        std::string type = strLine.substr(0, dpos);
+                        std::string value = strLine.substr(dpos + 1, dpos2 - dpos - 1);
+                        std::string key;
+                        // IP-CIDR/IP-CIDR6: include no-resolve flag
+                        if(type == "IP-CIDR" || type == "IP-CIDR6") {
+                            if(strLine.find(",no-resolve") != std::string::npos)
+                                key = type + "," + value + ",no-resolve";
+                            else
+                                key = type + "," + value;
+                        }
+                        // AND/OR/NOT/SUB-RULE: everything except last field
+                        else if(type == "AND" || type == "OR" || type == "NOT" || type == "SUB-RULE") {
+                            string_size last_comma = strLine.rfind(',');
+                            if(last_comma != std::string::npos && last_comma > dpos2)
+                                key = strLine.substr(0, last_comma);
+                            else
+                                key = type + "," + value;
+                        }
+                        // Default: TYPE,VALUE only
+                        else {
+                            key = type + "," + value;
+                        }
+                        if(argDedup.get(true) && !seenRules.emplace(key).second)
+                            continue;
+                    }
+                }
+            }
             output_content += "  - ";
         default:
             break;
@@ -624,6 +658,7 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
     tribool argGenClashScript = getUrlArg(argument, "script"), argEnableInsert = getUrlArg(argument, "insert");
     tribool argSkipCertVerify = getUrlArg(argument, "scv"), argFilterDeprecated = getUrlArg(argument, "fdn"), argExpandRulesets = getUrlArg(argument, "expand"), argAppendUserinfo = getUrlArg(argument, "append_info");
     tribool argPrependInsert = getUrlArg(argument, "prepend"), argTLS13 = getUrlArg(argument, "tls13");
+    tribool argDedup = getUrlArg(argument, "dedup");
 
     std::string base_content, output_content;
     ProxyGroupConfigs lCustomProxyGroups = global.customProxyGroups;
@@ -722,6 +757,7 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
     ext.enable_rule_generator = global.enableRuleGen;
     ext.overwrite_original_rules = global.overwriteOriginalRules;
     ext.managed_config_prefix = global.managedConfigPrefix;
+    ext.dedup = argDedup.get(true);
 
     /// load external configuration
     if(argExternalConfig.empty())

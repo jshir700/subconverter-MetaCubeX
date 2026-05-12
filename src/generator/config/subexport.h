@@ -57,6 +57,7 @@ struct extra_settings
     bool use_proxy_provider = true;
     std::vector<ProxyProvider> providers;
     bool authorized = false;
+    bool dedup = true;
 
     extra_settings() = default;
     extra_settings(const extra_settings&) = delete;

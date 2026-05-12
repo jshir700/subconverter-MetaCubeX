@@ -998,7 +998,7 @@ std::string proxyToClash(std::vector<Proxy> &nodes, const std::string &base_conf
 
     /*
     if(ext.enable_rule_generator)
-        rulesetToClash(yamlnode, ruleset_content_array, ext.overwrite_original_rules, ext.clash_new_field_name);
+        rulesetToClash(yamlnode, ruleset_content_array, ext.overwrite_original_rules, ext.clash_new_field_name, ext.dedup);
 
     return YAML::Dump(yamlnode);
     */
@@ -1019,7 +1019,7 @@ std::string proxyToClash(std::vector<Proxy> &nodes, const std::string &base_conf
         return YAML::Dump(yamlnode);
     }
 
-    std::string output_content = rulesetToClashStr(yamlnode, ruleset_content_array, ext.overwrite_original_rules, ext.clash_new_field_name);
+    std::string output_content = rulesetToClashStr(yamlnode, ruleset_content_array, ext.overwrite_original_rules, ext.clash_new_field_name, ext.dedup);
     output_content.insert(0, YAML::Dump(yamlnode));
     //rulesetToClash(yamlnode, ruleset_content_array, ext.overwrite_original_rules, ext.clash_new_field_name);
     //std::string output_content = YAML::Dump(yamlnode);
