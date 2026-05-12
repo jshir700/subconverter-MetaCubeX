@@ -72,8 +72,16 @@ int importItems(string_array &target, bool scope_limit)
 
 toml::value parseToml(const std::string &content, const std::string &fname)
 {
-    std::istringstream is(content);
-    return toml::parse(is, fname);
+    try
+    {
+        std::istringstream is(content);
+        return toml::parse(is, fname);
+    }
+    catch(toml::exception &e)
+    {
+        writeLog(0, "TOML parse failed for '" + fname + "': " + std::string(e.what()), LOG_LEVEL_DEBUG);
+        return toml::value();
+    }
 }
 
 void importItems(std::vector<toml::value> &root, const std::string &import_key, bool scope_limit = true)
