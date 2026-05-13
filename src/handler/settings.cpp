@@ -15,6 +15,9 @@
 
 //multi-thread lock
 std::mutex gMutexConfigure;
+// Last modification time tracking for readConf double-check
+static time_t gConfigMtime = 0;
+static bool gConfigLoaded = false;
 
 Settings global;
 
@@ -876,7 +879,27 @@ void readTOMLConf(toml::value &root)
 
 void readConf()
 {
+    // Double-check lock: check file mtime before acquiring the heavy mutex
+    struct stat configStat {};
+    bool needsReload = true;
+    if (gConfigLoaded && stat(global.prefPath.data(), &configStat) == 0) {
+        if (configStat.st_mtime == gConfigMtime) {
+            needsReload = false;
+        }
+    }
+
+    if (!needsReload)
+        return;
+
     guarded_mutex guard(gMutexConfigure);
+
+    // Second check after acquiring lock (another thread may have reloaded already)
+    if (gConfigLoaded && stat(global.prefPath.data(), &configStat) == 0) {
+        if (configStat.st_mtime == gConfigMtime) {
+            return;
+        }
+    }
+
     writeLog(0, "Loading preference settings...", LOG_LEVEL_INFO);
 
     eraseElements(global.excludeRemarks);
@@ -890,12 +913,22 @@ void readConf()
         if(prefdata.find("common:") != std::string::npos)
         {
             YAML::Node yaml = YAML::Load(prefdata);
-            if(yaml.size() && yaml["common"])
+            if(yaml.size() && yaml["common"]) {
+                // Update mtime on success
+                if (stat(global.prefPath.data(), &configStat) == 0)
+                    gConfigMtime = configStat.st_mtime;
+                gConfigLoaded = true;
                 return readYAMLConf(yaml);
+            }
         }
         toml::value conf = parseToml(prefdata, global.prefPath);
-        if(!conf.is_empty() && toml::find_or<int>(conf, "version", 0))
+        if(!conf.is_empty() && toml::find_or<int>(conf, "version", 0)) {
+            // Update mtime on success
+            if (stat(global.prefPath.data(), &configStat) == 0)
+                gConfigMtime = configStat.st_mtime;
+            gConfigLoaded = true;
             return readTOMLConf(conf);
+        }
     }
     catch (YAML::Exception &e)
     {
@@ -1163,6 +1196,11 @@ void readConf()
     ini.get_bool_if_exist("script_clean_context", global.scriptCleanContext);
     ini.get_bool_if_exist("async_fetch_ruleset", global.asyncFetchRuleset);
     ini.get_bool_if_exist("skip_failed_links", global.skipFailedLinks);
+
+    // Update mtime on INI success path (for double-check lock optimization)
+    if (stat(global.prefPath.data(), &configStat) == 0)
+        gConfigMtime = configStat.st_mtime;
+    gConfigLoaded = true;
 
     writeLog(0, "Load preference settings in INI format completed.", LOG_LEVEL_INFO);
 }

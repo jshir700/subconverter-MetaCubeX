@@ -4,6 +4,7 @@
 //#include <mutex>
 #include <thread>
 #include <atomic>
+#include <future>
 
 #include <curl/curl.h>
 
@@ -121,6 +122,21 @@ static int logger(CURL *handle, curl_infotype type, char *data, size_t size, voi
     return 0;
 }
 
+// Thread-local CURL handle pool for connection reuse.
+// Each thread gets its own persistent handle, avoiding curl_easy_init/cleanup
+// overhead and allowing TCP/TLS connection reuse across requests.
+static CURL* get_thread_local_curl_handle()
+{
+    thread_local CURL* handle = nullptr;
+    if (!handle) {
+        curl_init();
+        handle = curl_easy_init();
+    } else {
+        curl_easy_reset(handle);
+    }
+    return handle;
+}
+
 static inline void curl_set_common_options(CURL *curl_handle, const char *url, curl_progress_data *data)
 {
     curl_easy_setopt(curl_handle, CURLOPT_URL, url);
@@ -135,6 +151,14 @@ static inline void curl_set_common_options(CURL *curl_handle, const char *url, c
     long timeout = data && data->timeout > 0 ? data->timeout : global.fetch_timeout;
     curl_easy_setopt(curl_handle, CURLOPT_TIMEOUT, timeout);
     curl_easy_setopt(curl_handle, CURLOPT_COOKIEFILE, "");
+    // Enable TCP keepalive for long-lived connections
+    curl_easy_setopt(curl_handle, CURLOPT_TCP_KEEPALIVE, 1L);
+    curl_easy_setopt(curl_handle, CURLOPT_TCP_KEEPIDLE, 60L);
+    curl_easy_setopt(curl_handle, CURLOPT_TCP_KEEPINTVL, 30L);
+    // Cache DNS results for 5 minutes to avoid redundant lookups
+    curl_easy_setopt(curl_handle, CURLOPT_DNS_CACHE_TIMEOUT, 300L);
+    // Allow HTTP/1.1 keep-alive connection reuse via the connection cache
+    curl_easy_setopt(curl_handle, CURLOPT_FORBID_REUSE, 0L);
     if(data)
     {
         if(data->size_limit)
@@ -147,15 +171,13 @@ static inline void curl_set_common_options(CURL *curl_handle, const char *url, c
 //static std::string curlGet(const std::string &url, const std::string &proxy, std::string &response_headers, CURLcode &return_code, const string_map &request_headers)
 static int curlGet(const FetchArgument &argument, FetchResult &result)
 {
-    CURL *curl_handle;
     std::string *data = result.content, new_url = argument.url;
     curl_slist *header_list = nullptr;
     defer(curl_slist_free_all(header_list);)
     long retVal;
 
-    curl_init();
-
-    curl_handle = curl_easy_init();
+    // Use thread-local CURL handle for connection reuse (avoids TCP/TLS handshake overhead)
+    CURL *curl_handle = get_thread_local_curl_handle();
     if(!argument.proxy.empty())
     {
         if(startsWith(argument.proxy, "cors:"))
@@ -264,7 +286,7 @@ static int curlGet(const FetchArgument &argument, FetchResult &result)
         curl_slist_free_all(cookies);
     }
 
-    curl_easy_cleanup(curl_handle);
+    // Handle is thread-local and reused; DO NOT cleanup here — avoids TLS handshake overhead
 
     if(data && !argument.keep_resp_on_fail)
     {
@@ -277,7 +299,6 @@ static int curlGet(const FetchArgument &argument, FetchResult &result)
                      LOG_LEVEL_WARNING);
             data->clear();
         }
-        data->shrink_to_fit();
     }
 
     return *result.status_code;
@@ -370,14 +391,19 @@ std::string webGet(const std::string &url, const std::string &proxy, unsigned in
             writeLog(0, "CACHE NOT EXIST: '" + url + "', creating new cache.");
         //content = curlGet(url, proxy, response_headers, return_code); // try to fetch data
         curlGet(argument, fetch_res);
-        if(return_code == 200) // success, save new cache
+        if(return_code == 200) // success, save new cache asynchronously
         {
-            //guarded_mutex guard(cache_rw_lock);
-            cache_rw_lock.writeLock();
-            defer(cache_rw_lock.writeUnlock();)
-            fileWrite(path, content, true);
-            if(response_headers)
-                fileWrite(path_header, *response_headers, true);
+            // Capture copies of data for the async write (fire-and-forget)
+            std::string cache_content = content;
+            std::string cache_path = path;
+            std::string cache_path_header = path_header;
+            std::string cache_response_headers = response_headers ? *response_headers : "";
+            bool has_response_headers = response_headers != nullptr;
+            std::thread([cache_content, cache_path, cache_path_header, cache_response_headers, has_response_headers]() {
+                fileWrite(cache_path, cache_content, true);
+                if(has_response_headers)
+                    fileWrite(cache_path_header, cache_response_headers, true);
+            }).detach();
         }
         else
         {

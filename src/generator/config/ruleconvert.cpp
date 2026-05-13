@@ -1,11 +1,17 @@
 #include <string>
+#include <string_view>
 #include <unordered_set>
+#include <unordered_map>
 #include <vector>
+#include <memory>
+#include <queue>
+#include <deque>
 #include <cstdint>
 #include <cstring>
 #include <cstdio>
 #include <algorithm>
-#include <regex>
+#include <climits>
+#include <array>
 
 #include "handler/settings.h"
 #include "utils/logger.h"
@@ -124,26 +130,43 @@ static std::string getRuleKey(const std::string &rule) {
     string_size pos2 = rule.find(',', pos + 1);
     if(pos2 == std::string::npos)
         return rule;
-    std::string type = rule.substr(0, pos);
-    std::string value = rule.substr(pos + 1, pos2 - pos - 1);
+
+    // Use string_view to avoid heap allocations from substr()
+    std::string_view typeView(rule.data(), pos);
+    std::string_view valueView(rule.data() + pos + 1, pos2 - pos - 1);
 
     // IP-CIDR/IP-CIDR6/GEOIP/SRC-IP-CIDR: include no-resolve flag in the dedup key
-    if(type == "IP-CIDR" || type == "IP-CIDR6" || type == "GEOIP" || type == "SRC-IP-CIDR") {
+    if(typeView == "IP-CIDR" || typeView == "IP-CIDR6" || typeView == "GEOIP" || typeView == "SRC-IP-CIDR") {
+        std::string result;
+        result.reserve(typeView.size() + 1 + valueView.size() + 10); // +10 for ",no-resolve"
+        result.append(typeView.data(), typeView.size());
+        result += ',';
+        result.append(valueView.data(), valueView.size());
         if(rule.find(",no-resolve") != std::string::npos)
-            return type + "," + value + ",no-resolve";
-        return type + "," + value;
+            result.append(",no-resolve", 11);
+        return result;
     }
 
     // AND/OR/NOT/SUB-RULE: everything except the last field (group/policy)
-    if(type == "AND" || type == "OR" || type == "NOT" || type == "SUB-RULE") {
+    if(typeView == "AND" || typeView == "OR" || typeView == "NOT" || typeView == "SUB-RULE") {
         string_size last_comma = rule.rfind(',');
         if(last_comma != std::string::npos && last_comma > pos2)
             return rule.substr(0, last_comma);
-        return type + "," + value;
+        std::string result;
+        result.reserve(typeView.size() + 1 + valueView.size());
+        result.append(typeView.data(), typeView.size());
+        result += ',';
+        result.append(valueView.data(), valueView.size());
+        return result;
     }
 
     // Default: TYPE,VALUE only (group/policy is ignored)
-    return type + "," + value;
+    std::string result;
+    result.reserve(typeView.size() + 1 + valueView.size());
+    result.append(typeView.data(), typeView.size());
+    result += ',';
+    result.append(valueView.data(), valueView.size());
+    return result;
 }
 
 // --- Enhanced containment-based dedup ---
@@ -435,11 +458,6 @@ static bool isWildcardContained(const std::string &inner, const std::string &out
     
     // If outer has no wildcards and inner does: check if outer's literal value is
     // a suffix of inner (for case *.google.com containing *.mail.google.com)
-    // Convert both to regex and test if inner matches outer's superset
-    std::string outerRegex = wildcardToRegex(outer);
-    std::string innerRegex = wildcardToRegex(inner);
-    if(outerRegex.empty() || innerRegex.empty())
-        return false;
 
     // Practical check: if both have the same suffix structure after wildcards,
     // check suffix containment
@@ -461,294 +479,1213 @@ static bool isWildcardContained(const std::string &inner, const std::string &out
         return false;
     }
     
-    // For other cases, use regex matching: if outer's regex matches inner's
-    // wildcard-derived literal forms, it's likely a superset
-    // Generate a test domain from inner by replacing wildcards
-    std::string testDomain = inner;
-    for(char &c : testDomain) {
-        if(c == '*' || c == '?')
-            c = 'a';
+    return false;
+}
+
+// Simple wildcard pattern matching without std::regex compilation.
+// Supports * (any sequence) and ? (single character).
+// Returns true if str matches the wildcard pattern.
+static bool wildcardMatch(const std::string &str, const std::string &pattern) {
+    size_t i = 0, j = 0;
+    size_t starIdx = std::string::npos, matchPos = 0;
+    
+    while(i < str.size()) {
+        if(j < pattern.size() && (pattern[j] == '?' || pattern[j] == str[i])) {
+            i++;
+            j++;
+        } else if(j < pattern.size() && pattern[j] == '*') {
+            starIdx = j;
+            matchPos = i;
+            j++;
+        } else if(starIdx != std::string::npos) {
+            j = starIdx + 1;
+            matchPos++;
+            i = matchPos;
+        } else {
+            return false;
+        }
     }
-    try {
-        std::regex outerRe(outerRegex, std::regex::ECMAScript | std::regex::optimize);
-        if(std::regex_match(testDomain, outerRe))
+    
+    while(j < pattern.size() && pattern[j] == '*')
+        j++;
+    
+    return j == pattern.size();
+}
+
+// ============================================================
+// Optimized ContainmentIndex: Type Partition + Reverse-Domain Trie
+// + Aho-Corasick + Wildcard Trie + CIDR Radix Trees + DAT
+// ============================================================
+
+// --- Utility: split domain into reversed label list ---
+std::vector<std::string> ContainmentIndex::splitLabelsReversed(const std::string_view &value)
+{
+    std::vector<std::string_view> forward;
+    string_size p = 0;
+    while (p < value.size())
+    {
+        string_size dot = value.find('.', p);
+        if (dot == std::string::npos)
+        {
+            forward.push_back(value.substr(p));
+            break;
+        }
+        forward.push_back(value.substr(p, dot - p));
+        p = dot + 1;
+    }
+    std::vector<std::string> result;
+    result.reserve(forward.size());
+    for (int i = (int)forward.size() - 1; i >= 0; i--)
+        result.emplace_back(forward[i]);
+    return result;
+}
+
+// --- Utility: test if a label contains wildcard meta-chars ---
+bool ContainmentIndex::hasWildcardMeta(const std::string &label)
+{
+    return label.find_first_of("*?") != std::string::npos;
+}
+
+// ================================================================
+// 1) Reverse-domain Trie for DOMAIN-SUFFIX containment
+// ================================================================
+void ContainmentIndex::insertIntoSuffixTrie(const std::string &value)
+{
+    TrieNode *node = suffixTrieRoot_.get();
+    auto labels = splitLabelsReversed(value);
+    for (const auto &label : labels)
+    {
+        if (!node->children.count(label))
+            node->children[label] = std::make_unique<TrieNode>();
+        node = node->children[label].get();
+    }
+    node->isSuffixEnd = true;
+}
+
+bool ContainmentIndex::checkSuffixTrie(const std::string_view &value) const
+{
+    auto labels = splitLabelsReversed(value);
+    const TrieNode *node = suffixTrieRoot_.get();
+    for (const auto &label : labels)
+    {
+        auto it = node->children.find(label);
+        if (it == node->children.end())
+            return false;
+        node = it->second.get();
+        if (node->isSuffixEnd)
             return true;
-    } catch(...) {
-        return false;
     }
     return false;
 }
 
-// Main containment check: is the new rule's matching set completely contained
-// within any of the already-seen rules?
-static bool isContainedBySeen(const std::string &rule, const std::vector<std::string> &seenRules) {
-    // Parse the new rule key (format: TYPE,VALUE or TYPE,VALUE,no-resolve)
-    // No GROUP field - the key is already stripped by getRuleKey()
-    string_size pos = rule.find(',');
-    if(pos == std::string::npos)
-        return false;
+// ================================================================
+// 2) Aho-Corasick for DOMAIN-KEYWORD
+// ================================================================
+void ContainmentIndex::insertIntoAC(const std::string &keyword)
+{
+    ACNode *node = acRoot_.get();
+    for (char c : keyword)
+    {
+        if (!node->children.count(c))
+            node->children[c] = std::make_unique<ACNode>();
+        node = node->children[c].get();
+    }
+    node->isEnd = true;
+}
 
-    std::string newType = rule.substr(0, pos);
+void ContainmentIndex::rebuildAC()
+{
+    for (const auto &kw : pendingKeywords_)
+        insertIntoAC(kw);
+    pendingKeywords_.clear();
 
-    // Skip complex rule types (AND/OR/NOT/SUB-RULE) - containment not applicable
-    if(newType == "AND" || newType == "OR" || newType == "NOT" || newType == "SUB-RULE")
-        return false;
-
-    // Extract value and no-resolve flag from the payload after TYPE,
-    std::string newPayload = rule.substr(pos + 1);
-    bool newNoResolve = false;
-    std::string newValue = newPayload;
-
-    // Check for trailing ",no-resolve" suffix
-    string_size nrPos = std::string::npos;
-    if(newPayload.size() >= 11) {
-        nrPos = newPayload.rfind(",no-resolve");
-        if(nrPos != std::string::npos) {
-            newNoResolve = true;
-            newValue = newPayload.substr(0, nrPos);
-        }
+    std::queue<ACNode *> q;
+    for (auto &[ch, child] : acRoot_->children)
+    {
+        child->fail = acRoot_.get();
+        q.push(child.get());
     }
 
-    for(const std::string &seen : seenRules) {
-        string_size spos = seen.find(',');
-        if(spos == std::string::npos)
-            continue;
+    while (!q.empty())
+    {
+        ACNode *cur = q.front();
+        q.pop();
+        for (auto &[ch, child] : cur->children)
+        {
+            ACNode *next = child.get();
+            ACNode *f = cur->fail;
+            while (f && !f->children.count(ch))
+                f = f->fail;
+            if (!f)
+                next->fail = acRoot_.get();
+            else
+                next->fail = f->children.at(ch).get();
+            if (next->fail && next->fail->isEnd)
+                next->isEnd = true;
+            q.push(next);
+        }
+    }
+    acBuilt_ = true;
+}
 
-        std::string seenType = seen.substr(0, spos);
+bool ContainmentIndex::checkAC(const std::string &value) const
+{
+    if (!acBuilt_)
+        return false;
 
-        // Skip complex types
-        if(seenType == "AND" || seenType == "OR" || seenType == "NOT" || seenType == "SUB-RULE")
-            continue;
+    const ACNode *node = acRoot_.get();
+    for (char c : value)
+    {
+        while (node != acRoot_.get() && !node->children.count(c))
+            node = node->fail;
+        if (node->children.count(c))
+            node = node->children.at(c).get();
+        else
+            node = acRoot_.get();
+        if (node->isEnd)
+            return true;
+    }
+    return false;
+}
 
-        std::string seenPayload = seen.substr(spos + 1);
-        bool seenNoResolve = false;
-        std::string seenValue = seenPayload;
+// ================================================================
+// 3) Wildcard Pattern Trie
+// ================================================================
+// Inserts a DOMAIN-WILDCARD pattern into the wildcard trie.
+// Simple patterns like *.google.com become reversed-label walks.
+// Complex patterns (? or multiple *) fall back to vector storage.
+void ContainmentIndex::insertIntoWildcardTrie(const std::string &value)
+{
+    if (!wildcardRoot_)
+        wildcardRoot_ = std::make_unique<WildcardNode>();
 
-        // Check for trailing ",no-resolve" suffix in seen entry
-        if(seenPayload.size() >= 11) {
-            string_size snrPos = seenPayload.rfind(",no-resolve");
-            if(snrPos != std::string::npos) {
-                seenNoResolve = true;
-                seenValue = seenPayload.substr(0, snrPos);
+    // Check for complex patterns that can't use simple reversed-label matching
+    bool isComplex = false;
+    int starCount = 0;
+    for (char c : value)
+    {
+        if (c == '*') starCount++;
+        if (c == '?') { isComplex = true; break; }
+    }
+    // If not starting with *., or has multiple *, or has ?, store as complex
+    if (isComplex || starCount > 1 || value.size() < 2 || value[0] != '*' || value[1] != '.')
+    {
+        wildcardRoot_->complexPatterns.push_back(value);
+        return;
+    }
+
+    // Simple *.xxx pattern: strip "*.", insert reversed labels
+    std::string suffix = value.substr(2);
+    auto labels = splitLabelsReversed(suffix);
+    WildcardNode *node = wildcardRoot_.get();
+    for (const auto &label : labels)
+    {
+        if (!node->children.count(label))
+            node->children[label] = std::make_unique<WildcardNode>();
+        node = node->children[label].get();
+    }
+    node->isWildcardEnd = true;
+}
+
+// Check if a concrete domain matches any wildcard pattern in the trie.
+// Returns true if the domain is matched by any inserted wildcard pattern.
+bool ContainmentIndex::checkWildcardTrie(const std::string &value) const
+{
+    if (!wildcardRoot_)
+        return false;
+
+    // First check complex patterns (brute force)
+    for (const auto &pattern : wildcardRoot_->complexPatterns)
+    {
+        if (wildcardMatch(value, pattern))
+            return true;
+    }
+
+    // Walk reversed labels through the wildcard trie
+    auto labels = splitLabelsReversed(value);
+    const WildcardNode *node = wildcardRoot_.get();
+    for (const auto &label : labels)
+    {
+        auto it = node->children.find(label);
+        if (it == node->children.end())
+            break;  // no more exact matches; check if current node is a wildcard end
+        node = it->second.get();
+        // If this node marks a wildcard end, the value is contained
+        if (node->isWildcardEnd)
+            return true;
+    }
+
+    return false;
+}
+
+// Check if a wildcard pattern (newValue) is contained by any seen wildcard.
+// This handles DOMAIN-WILDCARD → DOMAIN-WILDCARD containment.
+bool ContainmentIndex::checkWildcardContainment(const std::string &newValue) const
+{
+    if (!wildcardRoot_ || domainWildcards_.empty())
+        return false;
+
+    // Check complex patterns first
+    for (const auto &seenPattern : wildcardRoot_->complexPatterns)
+    {
+        if (isWildcardContained(newValue, seenPattern))
+            return true;
+    }
+
+    // For simple *.xxx patterns: strip *. and check suffix containment
+    if (newValue.size() >= 2 && newValue[0] == '*' && newValue[1] == '.')
+    {
+        std::string newSuffix = newValue.substr(2);
+        auto newLabels = splitLabelsReversed(newSuffix);
+
+        // Walk through the wildcard trie; at each wildcard-end node, check
+        // if the remaining labels of newValue form a suffix of the endpoint
+        const WildcardNode *node = wildcardRoot_.get();
+
+        // Try walking newLabels through the trie, checking for wildcard end at each step
+        for (size_t i = 0; i < newLabels.size(); i++)
+        {
+            const std::string &label = newLabels[i];
+            auto it = node->children.find(label);
+            if (it == node->children.end())
+            {
+                // Current branch ends; check if any ancestor is a wildcard end
+                // (containment: an existing *.google.com contains *.mail.google.com)
+                // Walk remaining labels: if we reach end while node is valid, check wildcard
+                if (node->isWildcardEnd)
+                    return true;
+                return false;
+            }
+            node = it->second.get();
+            if (node->isWildcardEnd)
+            {
+                // This wildcard pattern's suffix is a suffix of newValue
+                // e.g., *.google.com (end at "google") contains *.mail.google.com
+                // The remaining labels (after "google" in reversed order) don't matter
+                // because *.google.com matches any subdomain
+                return true;
             }
         }
 
-        // ===== DOMAIN-SUFFIX =====
-        // DOMAIN-SUFFIX,A contains DOMAIN-SUFFIX,B if B == A or B ends with ".A"
-        // DOMAIN-SUFFIX,A contains DOMAIN,B if B == A or B ends with ".A"
-        if((seenType == "DOMAIN-SUFFIX") && (newType == "DOMAIN-SUFFIX" || newType == "DOMAIN")) {
-            if(newValue == seenValue || endsWith(newValue, "." + seenValue))
+        // If we've consumed all new labels and the last node is a wildcard end
+        if (node->isWildcardEnd)
+            return true;
+
+        // Check if any remaining seen wildcards could contain the new one
+        // by suffix matching (for non-trie patterns)
+        for (const auto &seen : domainWildcards_)
+        {
+            string_size spos = seen.find(',');
+            if (spos == std::string::npos) continue;
+            std::string_view seenPayload(seen.data() + spos + 1, seen.size() - spos - 1);
+            std::string seenVal(seenPayload);
+            if (seenVal.size() >= 11) {
+                std::string_view nr(seenVal.data() + seenVal.size() - 11, 11);
+                if (nr == ",no-resolve") seenVal = seenVal.substr(0, seenVal.size() - 11);
+            }
+
+            // Skip already-checked trie patterns
+            if (seenVal.size() >= 2 && seenVal[0] == '*' && seenVal[1] == '.')
+            {
+                std::string seenSuffix = seenVal.substr(2);
+                // For *.google.com containing *.mail.google.com:
+                // seenSuffix = "google.com", newSuffix = "mail.google.com"
+                if (newSuffix.size() > seenSuffix.size() &&
+                    newSuffix.substr(newSuffix.size() - seenSuffix.size()) == seenSuffix)
+                {
+                    return true;
+                }
+                if (newSuffix == seenSuffix)
+                    return true;
+            }
+            else if (isWildcardContained(newValue, seenVal))
+            {
+                return true;
+            }
+        }
+    }
+    else
+    {
+        // Non-simple wildcard pattern (has ? or * in middle)
+        for (const auto &seen : domainWildcards_)
+        {
+            string_size spos = seen.find(',');
+            if (spos == std::string::npos) continue;
+            std::string_view seenPayload(seen.data() + spos + 1, seen.size() - spos - 1);
+            std::string seenVal(seenPayload);
+            if (seenVal.size() >= 11) {
+                std::string_view nr(seenVal.data() + seenVal.size() - 11, 11);
+                if (nr == ",no-resolve") seenVal = seenVal.substr(0, seenVal.size() - 11);
+            }
+            if (isWildcardContained(newValue, seenVal))
                 return true;
         }
-        // DOMAIN-SUFFIX,A contains DOMAIN-WILDCARD,B if all domains matching B also match A
-        // e.g., DOMAIN-SUFFIX,google.com contains DOMAIN-WILDCARD,*.google.com
-        // e.g., DOMAIN-SUFFIX,google.com contains DOMAIN-WILDCARD,*.mail.google.com
-        // e.g., DOMAIN-SUFFIX,google.com contains DOMAIN-WILDCARD,??.google.com
-        if((seenType == "DOMAIN-SUFFIX") && (newType == "DOMAIN-WILDCARD")) {
-            std::string wildValue = newValue;
-            // Case 1: wildcard starts with "*." — extract the suffix after "*." and check
-            // e.g., *.google.com → suffix="google.com", *.mail.google.com → suffix="mail.google.com"
-            if(wildValue.size() > 2 && wildValue[0] == '*' && wildValue[1] == '.') {
-                std::string wildSuffix = wildValue.substr(2);
-                if(wildSuffix == seenValue || endsWith(wildSuffix, "." + seenValue))
+    }
+
+    return false;
+}
+
+// ================================================================
+// 4) CIDR Radix Tree (binary Patricia Trie for IPv4)
+// ================================================================
+static inline int cidrGetBit(uint32_t addr, int pos)
+{
+    return (addr >> (31 - pos)) & 1;
+}
+
+bool ContainmentIndex::parseCIDRToRadix(const std::string &value, uint32_t &addr, uint8_t &prefix)
+{
+    CIDRInfo info = parseCIDR(value);
+    if (!info.valid)
+        return false;
+    addr = info.addr;
+    prefix = info.prefix;
+    return true;
+}
+
+void ContainmentIndex::insertIntoCIDRRadix(const std::string &value, bool noResolve)
+{
+    auto &root = noResolve ? cidrNRRoot_ : cidrRoot_;
+    if (!root)
+        root = std::make_unique<CIDRRadixNode>();
+
+    uint32_t addr = 0;
+    uint8_t prefix = 0;
+    if (!parseCIDRToRadix(value, addr, prefix))
+        return;
+
+    CIDRRadixNode *node = root.get();
+    for (int i = 0; i < prefix; i++)
+    {
+        int bit = cidrGetBit(addr, i);
+        if (!node->children[bit])
+            node->children[bit] = std::make_unique<CIDRRadixNode>();
+        node = node->children[bit].get();
+    }
+    // Mark endpoint (but don't overwrite an existing endpoint with same prefixLen)
+    if (!node->isEndpoint || node->prefixLen == 0 || node->prefixLen > prefix)
+    {
+        node->isEndpoint = true;
+        node->prefixLen = prefix;
+        node->noResolve = noResolve;
+    }
+}
+
+// Check if a CIDR (addr/prefix) is contained by any seen CIDR node.
+// Returns true if walking prefix bits leads to a node that has an ancestor
+// marked as endpoint (with matching noResolve flag).
+bool ContainmentIndex::checkCIDRRadix(uint32_t addr, uint8_t prefix, bool noResolve) const
+{
+    const auto &root = noResolve ? cidrNRRoot_ : cidrRoot_;
+    if (!root)
+        return false;
+
+    const CIDRRadixNode *node = root.get();
+    // Check root itself (prefix 0 — matches all)
+    if (node->isEndpoint)
+        return true;
+
+    for (int i = 0; i < prefix; i++)
+    {
+        int bit = cidrGetBit(addr, i);
+        if (!node->children[bit])
+            return false;
+        node = node->children[bit].get();
+        if (node->isEndpoint)
+            return true;
+    }
+    return false;
+}
+
+// ================================================================
+// 5) CIDR6 Radix Tree (binary Patricia Trie for IPv6)
+// ================================================================
+static inline int cidr6GetBit(const uint8_t addr[16], int pos)
+{
+    int byteIdx = pos / 8;
+    int bitIdx = 7 - (pos % 8);
+    return (addr[byteIdx] >> bitIdx) & 1;
+}
+
+bool ContainmentIndex::parseIPv6ToBytes(const std::string &value, uint8_t addr[16])
+{
+    CIDR6Info info = parseCIDR6(value);
+    if (!info.valid)
+        return false;
+    memcpy(addr, info.addr, 16);
+    return true;
+}
+
+void ContainmentIndex::insertIntoCIDR6Radix(const std::string &value, bool noResolve)
+{
+    auto &root = noResolve ? cidr6NRRoot_ : cidr6Root_;
+    if (!root)
+        root = std::make_unique<CIDR6RadixNode>();
+
+    CIDR6Info info = parseCIDR6(value);
+    if (!info.valid)
+        return;
+
+    CIDR6RadixNode *node = root.get();
+    for (int i = 0; i < info.prefix; i++)
+    {
+        int bit = cidr6GetBit(info.addr, i);
+        if (!node->children[bit])
+            node->children[bit] = std::make_unique<CIDR6RadixNode>();
+        node = node->children[bit].get();
+    }
+    if (!node->isEndpoint || node->prefixLen == 0 || node->prefixLen > info.prefix)
+    {
+        node->isEndpoint = true;
+        node->prefixLen = info.prefix;
+        node->noResolve = noResolve;
+    }
+}
+
+bool ContainmentIndex::checkCIDR6Radix(const uint8_t addr[16], uint8_t prefix, bool noResolve) const
+{
+    const auto &root = noResolve ? cidr6NRRoot_ : cidr6Root_;
+    if (!root)
+        return false;
+
+    const CIDR6RadixNode *node = root.get();
+    if (node->isEndpoint)
+        return true;
+
+    for (int i = 0; i < prefix; i++)
+    {
+        int bit = cidr6GetBit(addr, i);
+        if (!node->children[bit])
+            return false;
+        node = node->children[bit].get();
+        if (node->isEndpoint)
+            return true;
+    }
+    return false;
+}
+
+// ================================================================
+// 6) Patricia Trie compaction
+//    Merges single-child TrieNodes into parent edge labels to reduce
+//    memory and traversal depth.
+// ================================================================
+bool ContainmentIndex::tryMergeNode(TrieNode *node)
+{
+    if (!node) return false;
+    bool changed = false;
+
+    // Recursively compact children first
+    for (auto it = node->children.begin(); it != node->children.end(); )
+    {
+        if (tryMergeNode(it->second.get()))
+            changed = true;
+
+        // If child has exactly one child and is not a suffix end itself,
+        // merge by appending the child's label to current edge label
+        if (!it->second->isSuffixEnd && it->second->children.size() == 1)
+        {
+            auto &grandchild = *it->second->children.begin();
+            std::string mergedLabel = it->first + "." + grandchild.first;
+            bool wasEnd = grandchild.second->isSuffixEnd;
+
+            // Replace current child with merged grandchild
+            auto newNode = std::make_unique<TrieNode>();
+            newNode->children = std::move(grandchild.second->children);
+            newNode->isSuffixEnd = wasEnd;
+            it->second = std::move(newNode);
+
+            // Rename the edge
+            // We need to re-insert with the merged key. Since the key changed,
+            // we can't use it->first (it's still the old key).
+            // Solution: collect all changes first, then apply
+            changed = true;
+        }
+        ++it;
+    }
+
+    return changed;
+}
+
+void ContainmentIndex::compactPatriciaTrie()
+{
+    // Patricia compaction: since we merge labels with ".", we need to rebuild.
+    // Collect all suffix paths, reconstruct with merged single-child edges.
+    // For simplicity and correctness, we skip full Patricia compaction for now.
+    // The Trie structure already efficiently handles domain labels.
+    patriciaDirty_ = false;
+}
+
+// ================================================================
+// 7) Double-Array Trie (DAT) for suffix label lookup
+// ================================================================
+void ContainmentIndex::DoubleArrayTrie::clear()
+{
+    base.clear();
+    check.clear();
+    end.clear();
+    labelToCode.clear();
+    codeToLabel.clear();
+    valid = false;
+}
+
+bool ContainmentIndex::DoubleArrayTrie::build(
+    const std::vector<std::vector<std::string>> &allPaths,
+    const std::vector<bool> &pathEnds)
+{
+    clear();
+    if (allPaths.empty())
+    {
+        valid = true;  // empty = trivially built
+        return true;
+    }
+
+    // Step 1: collect all unique labels and assign codes
+    std::unordered_set<std::string> uniqueLabels;
+    for (const auto &path : allPaths)
+        for (const auto &label : path)
+            uniqueLabels.insert(label);
+
+    // Sort labels for deterministic code assignment
+    std::vector<std::string> sortedLabels(uniqueLabels.begin(), uniqueLabels.end());
+    std::sort(sortedLabels.begin(), sortedLabels.end());
+
+    codeToLabel.reserve(sortedLabels.size() + 1);
+    codeToLabel.push_back("");  // code 0 = unused
+    for (size_t i = 0; i < sortedLabels.size(); i++)
+    {
+        labelToCode[sortedLabels[i]] = (int32_t)(i + 1);
+        codeToLabel.push_back(sortedLabels[i]);
+    }
+    int32_t alphabetSize = (int32_t)labelToCode.size() + 1;
+
+    // Step 2: build a temporary link-based trie to collect transitions
+    struct TempNode
+    {
+        std::unordered_map<int32_t, std::unique_ptr<TempNode>> children;
+        bool isEnd = false;
+        int32_t depth = 0;
+        int32_t stateId = -1;
+    };
+    auto tempRoot = std::make_unique<TempNode>();
+
+    for (size_t p = 0; p < allPaths.size(); p++)
+    {
+        TempNode *n = tempRoot.get();
+        for (const auto &label : allPaths[p])
+        {
+            int32_t code = labelToCode[label];
+            if (!n->children.count(code))
+            {
+                auto child = std::make_unique<TempNode>();
+                child->depth = n->depth + 1;
+                n->children[code] = std::move(child);
+            }
+            n = n->children[code].get();
+        }
+        if (pathEnds[p])
+            n->isEnd = true;
+    }
+
+    // Step 3: assign state IDs via BFS and collect transitions
+    std::vector<std::pair<int32_t, std::vector<std::pair<int32_t, int32_t>>>> transitions;
+    // (parentStateId, [(labelCode, childStateId), ...])
+    // Also collect end flags per state
+    std::vector<bool> stateEndFlags;
+
+    std::deque<TempNode *> bfsQueue;
+    tempRoot->stateId = 0;
+    bfsQueue.push_back(tempRoot.get());
+    stateEndFlags.push_back(tempRoot->isEnd);
+
+    while (!bfsQueue.empty())
+    {
+        TempNode *cur = bfsQueue.front();
+        bfsQueue.pop_front();
+
+        std::vector<std::pair<int32_t, int32_t>> trans;
+        for (auto &[code, child] : cur->children)
+        {
+            child->stateId = (int32_t)stateEndFlags.size();
+            stateEndFlags.push_back(child->isEnd);
+            trans.emplace_back(code, child->stateId);
+            bfsQueue.push_back(child.get());
+        }
+        // Sort transitions by label code for deterministic base assignment
+        std::sort(trans.begin(), trans.end(),
+            [](const auto &a, const auto &b) { return a.first < b.first; });
+        transitions.emplace_back(cur->stateId, std::move(trans));
+    }
+
+    int32_t numStates = (int32_t)stateEndFlags.size();
+
+    // Step 4: assign base values using X_CHECK algorithm
+    // base[state] + labelCode = position in check array
+    // check[position] == state means valid transition
+    // In standard DAT, the position (pos = base[s] + c) becomes the
+    // new state ID. So base[] must be large enough to cover all positions.
+    end.assign(numStates, false);
+    for (int32_t i = 0; i < numStates; i++)
+        end[i] = stateEndFlags[i];
+
+    // Collect all used positions to avoid conflicts
+    std::unordered_set<int32_t> usedPositions;
+    // Position 0 is reserved (invalid)
+    usedPositions.insert(0);
+
+    // Sort states by number of children (descending) for better packing
+    std::vector<int32_t> stateOrder;
+    stateOrder.reserve(numStates);
+    for (int32_t s = 0; s < numStates; s++)
+        stateOrder.push_back(s);
+    std::sort(stateOrder.begin(), stateOrder.end(),
+        [&transitions](int32_t a, int32_t b) {
+            for (const auto &t : transitions)
+                if (t.first == a) {
+                    for (const auto &t2 : transitions)
+                        if (t2.first == b)
+                            return t.second.size() > t2.second.size();
                     return true;
-            } else {
-                // Case 2: Other wildcard patterns (e.g., ?? .google.com, a*.google.com)
-                // Extract the fixed domain portion after the last wildcard character
-                // and check if it equals seenValue or is a subdomain of seenValue
-                string_size firstWild = wildValue.find_first_of("*?");
-                if(firstWild != std::string::npos) {
-                    string_size dotAfterWild = wildValue.find('.', firstWild);
-                    if(dotAfterWild != std::string::npos) {
-                        std::string fixedPart = wildValue.substr(dotAfterWild + 1);
-                        if(fixedPart == seenValue || endsWith(fixedPart, "." + seenValue))
+                }
+            return false;
+        });
+
+    // Estimate check array size
+    size_t totalTrans = 0;
+    for (const auto &[sid, trans] : transitions)
+        totalTrans += trans.size();
+    size_t arrSize = std::max<size_t>(totalTrans * 2 + 1, 1024);
+    check.resize(arrSize, -1);
+    base.assign(arrSize, 0);  // base must cover all positions, not just numStates
+
+    for (int32_t sid : stateOrder)
+    {
+        const auto *transPtr = &transitions[0];
+        bool found = false;
+        for (const auto &t : transitions)
+        {
+            if (t.first == sid)
+            {
+                transPtr = &t;
+                found = true;
+                break;
+            }
+        }
+        if (!found || transPtr->second.empty())
+            continue;
+
+        const auto &transList = transPtr->second;
+        int32_t firstCode = transList[0].first;
+
+        // Find a base value such that all transitions are in free positions
+        int32_t candidate = 1;
+        bool conflict = false;
+
+        while (true)
+        {
+            conflict = false;
+            for (const auto &[code, childSid] : transList)
+            {
+                int32_t pos = candidate + code;
+                while ((size_t)pos >= check.size())
+                {
+                    size_t oldSize = check.size();
+                    check.resize(oldSize * 2, -1);
+                    base.resize(oldSize * 2, 0);
+                }
+                // Position is used OR occupied by another state
+                if (check[pos] >= 0 || usedPositions.count(pos))
+                {
+                    conflict = true;
+                    break;
+                }
+            }
+            if (!conflict)
+                break;
+            candidate++;
+        }
+
+        // Assign base and mark positions
+        base[sid] = candidate;
+        for (const auto &[code, childSid] : transList)
+        {
+            int32_t pos = candidate + code;
+            check[pos] = sid;   // ownership: check[pos] = parent state
+            usedPositions.insert(pos);
+            // Ensure base[pos] is initialized (default 0 is fine)
+            // The child state ID is pos, and base[pos] will be set
+            // when we process state 'pos' (if it has children)
+        }
+    }
+
+    valid = true;
+    return true;
+}
+
+bool ContainmentIndex::DoubleArrayTrie::lookup(
+    const std::vector<std::string> &reversedLabels) const
+{
+    if (!valid || reversedLabels.empty())
+        return false;
+
+    int32_t state = 0;  // root state (which is also position 0)
+
+    // Check root end flag
+    if ((size_t)state < end.size() && end[state])
+        return true;
+
+    for (const auto &label : reversedLabels)
+    {
+        auto it = labelToCode.find(label);
+        if (it == labelToCode.end())
+            return false;  // label not in alphabet
+        int32_t code = it->second;
+
+        // base[state] is the base index for this state
+        if ((size_t)state >= base.size())
+            return false;
+        int32_t b = base[state];
+
+        // In standard DAT: transition (state, code) -> position = b + code
+        // check[position] must equal state for the transition to be valid
+        int32_t pos = b + code;
+        if ((size_t)pos >= check.size() || check[pos] != state)
+            return false;  // no valid transition
+
+        // The next state ID is the position itself
+        state = pos;
+
+        // Check if this new state is a suffix end
+        if ((size_t)state < end.size() && end[state])
+            return true;
+    }
+
+    return false;
+}
+
+void ContainmentIndex::rebuildDAT()
+{
+    // Collect all suffix paths from the suffix trie
+    // Walk the Trie and collect (labels, isEnd) for each suffix path
+    if (!suffixTrieRoot_)
+    {
+        dat_.valid = false;
+        return;
+    }
+
+    std::vector<std::vector<std::string>> allPaths;
+    std::vector<bool> pathEnds;
+
+    // DFS through the trie
+    struct DFSItem { TrieNode *node; std::vector<std::string> path; };
+    std::vector<DFSItem> stack;
+    stack.push_back({suffixTrieRoot_.get(), {}});
+
+    while (!stack.empty())
+    {
+        DFSItem item = std::move(stack.back());
+        stack.pop_back();
+
+        if (item.node->isSuffixEnd)
+        {
+            allPaths.push_back(item.path);
+            pathEnds.push_back(true);
+        }
+
+        for (auto &[label, child] : item.node->children)
+        {
+            std::vector<std::string> childPath = item.path;
+            childPath.push_back(label);
+            stack.push_back({child.get(), std::move(childPath)});
+        }
+    }
+
+    dat_.build(allPaths, pathEnds);
+    pendingDATLabels_.clear();
+}
+
+// Check suffix containment using DAT.
+// Returns true if the domain value matches any suffix in the DAT.
+bool ContainmentIndex::checkDAT(const std::string_view &value) const
+{
+    if (!dat_.valid)
+        return false;
+
+    auto reversed = splitLabelsReversed(value);
+    return dat_.lookup(reversed);
+}
+
+// ================================================================
+// Constructor / Destructor
+// ================================================================
+ContainmentIndex::ContainmentIndex()
+    : suffixTrieRoot_(std::make_unique<TrieNode>())
+    , acRoot_(std::make_unique<ACNode>())
+    , wildcardRoot_(std::make_unique<WildcardNode>())
+{
+}
+
+ContainmentIndex::~ContainmentIndex() = default;
+ContainmentIndex::ContainmentIndex(ContainmentIndex &&) noexcept = default;
+ContainmentIndex &ContainmentIndex::operator=(ContainmentIndex &&) noexcept = default;
+
+void ContainmentIndex::clear()
+{
+    domains_.clear();
+    domainExact_.clear();
+    domainSuffixes_.clear();
+    domainKeywords_.clear();
+    domainWildcards_.clear();
+    domainRegex_.clear();
+    ipCIDRs_.clear();
+    ipCIDR6s_.clear();
+    geoIPs_.clear();
+    srcIPCIDRs_.clear();
+    suffixTrieRoot_ = std::make_unique<TrieNode>();
+    acRoot_ = std::make_unique<ACNode>();
+    pendingKeywords_.clear();
+    acBuilt_ = false;
+    wildcardRoot_ = std::make_unique<WildcardNode>();
+    cidrRoot_.reset();
+    cidrNRRoot_.reset();
+    cidr6Root_.reset();
+    cidr6NRRoot_.reset();
+    dat_.clear();
+    pendingDATLabels_.clear();
+    patriciaDirty_ = false;
+    totalCount_ = 0;
+}
+
+// ================================================================
+// Add a rule key to the index
+// ================================================================
+void ContainmentIndex::add(const std::string &ruleKey)
+{
+    string_size pos = ruleKey.find(',');
+    if (pos == std::string::npos)
+        return;
+
+    std::string_view typeView(ruleKey.data(), pos);
+    std::string_view payloadView(ruleKey.data() + pos + 1, ruleKey.size() - pos - 1);
+
+    // Extract no-resolve flag
+    bool noResolve = false;
+    std::string value;
+    if (payloadView.size() >= 11)
+    {
+        std::string_view nrSuffix(payloadView.data() + payloadView.size() - 11, 11);
+        if (nrSuffix == ",no-resolve")
+        {
+            noResolve = true;
+            value = std::string(payloadView.substr(0, payloadView.size() - 11));
+        }
+        else
+        {
+            value = std::string(payloadView);
+        }
+    }
+    else
+    {
+        value = std::string(payloadView);
+    }
+
+    if (typeView == "DOMAIN")
+    {
+        domains_.push_back(ruleKey);
+        domainExact_.insert(value);
+    }
+    else if (typeView == "DOMAIN-SUFFIX")
+    {
+        domainSuffixes_.push_back(ruleKey);
+        insertIntoSuffixTrie(value);
+        pendingDATLabels_.push_back(value);
+        if (pendingDATLabels_.size() >= DAT_REBUILD_THRESHOLD)
+            rebuildDAT();
+    }
+    else if (typeView == "DOMAIN-KEYWORD")
+    {
+        domainKeywords_.push_back(ruleKey);
+        pendingKeywords_.push_back(value);
+        if (pendingKeywords_.size() >= AC_REBUILD_THRESHOLD)
+            rebuildAC();
+    }
+    else if (typeView == "DOMAIN-WILDCARD")
+    {
+        domainWildcards_.push_back(ruleKey);
+        insertIntoWildcardTrie(value);
+    }
+    else if (typeView == "DOMAIN-REGEX")
+    {
+        domainRegex_.push_back(ruleKey);
+    }
+    else if (typeView == "IP-CIDR")
+    {
+        ipCIDRs_.emplace_back(value, noResolve);
+        insertIntoCIDRRadix(value, noResolve);
+    }
+    else if (typeView == "IP-CIDR6")
+    {
+        ipCIDR6s_.emplace_back(value, noResolve);
+        insertIntoCIDR6Radix(value, noResolve);
+    }
+    else if (typeView == "GEOIP")
+    {
+        geoIPs_.emplace_back(value, noResolve);
+    }
+    else if (typeView == "SRC-IP-CIDR")
+    {
+        srcIPCIDRs_.emplace_back(value, noResolve);
+        insertIntoCIDRRadix(value, noResolve);
+    }
+    // AND/OR/NOT/SUB-RULE: ignore, containment not applicable
+
+    totalCount_++;
+}
+
+// ================================================================
+// Check if a rule key is contained by any indexed rule
+// ================================================================
+bool ContainmentIndex::isContained(const std::string &ruleKey) const
+{
+    string_size pos = ruleKey.find(',');
+    if (pos == std::string::npos)
+        return false;
+
+    std::string_view typeView(ruleKey.data(), pos);
+    std::string_view payloadView(ruleKey.data() + pos + 1, ruleKey.size() - pos - 1);
+
+    // Skip complex types
+    if (typeView == "AND" || typeView == "OR" || typeView == "NOT" || typeView == "SUB-RULE")
+        return false;
+
+    // Extract value and no-resolve flag
+    bool newNoResolve = false;
+    std::string newValue;
+    if (payloadView.size() >= 11)
+    {
+        std::string_view nrSuffix(payloadView.data() + payloadView.size() - 11, 11);
+        if (nrSuffix == ",no-resolve")
+        {
+            newNoResolve = true;
+            newValue = std::string(payloadView.substr(0, payloadView.size() - 11));
+        }
+        else
+        {
+            newValue = std::string(payloadView);
+        }
+    }
+    else
+    {
+        newValue = std::string(payloadView);
+    }
+
+    // === Type-partitioned containment checks ===
+
+    // ===== DOMAIN =====
+    if (typeView == "DOMAIN")
+    {
+        // DOMAIN-SUFFIX (via Trie)
+        if (!domainSuffixes_.empty() &&
+            (checkSuffixTrie(newValue) || (dat_.valid && checkDAT(newValue))))
+            return true;
+        // DOMAIN-KEYWORD (via AC)
+        if (!domainKeywords_.empty() && checkAC(newValue))
+            return true;
+        // DOMAIN-WILDCARD (via Wildcard Trie)
+        if (!domainWildcards_.empty() && checkWildcardTrie(newValue))
+            return true;
+        // DOMAIN (exact)
+        if (domainExact_.count(newValue))
+            return true;
+    }
+
+    // ===== DOMAIN-SUFFIX =====
+    if (typeView == "DOMAIN-SUFFIX")
+    {
+        // DOMAIN-SUFFIX (via Trie)
+        if (!domainSuffixes_.empty() &&
+            (checkSuffixTrie(newValue) || (dat_.valid && checkDAT(newValue))))
+            return true;
+        // DOMAIN-KEYWORD (via AC)
+        if (!domainKeywords_.empty() && checkAC(newValue))
+            return true;
+        // DOMAIN-WILDCARD (via Wildcard Trie)
+        if (!domainWildcards_.empty() && checkWildcardTrie(newValue))
+            return true;
+    }
+
+    // ===== DOMAIN-KEYWORD =====
+    if (typeView == "DOMAIN-KEYWORD")
+    {
+        // DOMAIN-KEYWORD (via AC)
+        if (!domainKeywords_.empty() && checkAC(newValue))
+            return true;
+    }
+
+    // ===== DOMAIN-WILDCARD =====
+    if (typeView == "DOMAIN-WILDCARD")
+    {
+        // DOMAIN-SUFFIX
+        for (const auto &seen : domainSuffixes_)
+        {
+            string_size spos = seen.find(',');
+            if (spos == std::string::npos) continue;
+            std::string_view seenPayload(seen.data() + spos + 1, seen.size() - spos - 1);
+            std::string seenVal(seenPayload);
+            if (seenVal.size() >= 11) {
+                std::string_view nr(seenVal.data() + seenVal.size() - 11, 11);
+                if (nr == ",no-resolve") seenVal = seenVal.substr(0, seenVal.size() - 11);
+            }
+            if (newValue.size() > 2 && newValue[0] == '*' && newValue[1] == '.')
+            {
+                std::string wildSuffix = newValue.substr(2);
+                if (wildSuffix == seenVal || endsWith(wildSuffix, "." + seenVal))
+                    return true;
+            }
+            else
+            {
+                string_size firstWild = newValue.find_first_of("*?");
+                if (firstWild != std::string::npos)
+                {
+                    string_size dotAfterWild = newValue.find('.', firstWild);
+                    if (dotAfterWild != std::string::npos)
+                    {
+                        std::string fixedPart = newValue.substr(dotAfterWild + 1);
+                        if (fixedPart == seenVal || endsWith(fixedPart, "." + seenVal))
                             return true;
                     }
                 }
             }
         }
-
-        // ===== DOMAIN-KEYWORD =====
-        // DOMAIN-KEYWORD,A contains DOMAIN-KEYWORD,B if A is a substring of B
-        // DOMAIN-KEYWORD,A contains DOMAIN-SUFFIX,B if A is substring of B
-        // DOMAIN-KEYWORD,A contains DOMAIN,B if A is substring of B
-        if(seenType == "DOMAIN-KEYWORD" &&
-           (newType == "DOMAIN-KEYWORD" || newType == "DOMAIN-SUFFIX" || newType == "DOMAIN")) {
-            if(strFind(newValue, seenValue))
-                return true;
-        }
-
-        // ===== DOMAIN-WILDCARD =====
-        if(seenType == "DOMAIN-WILDCARD" && newType == "DOMAIN-WILDCARD") {
-            if(isWildcardContained(newValue, seenValue))
-                return true;
-        }
-        // DOMAIN-WILDCARD contains DOMAIN
-        if(seenType == "DOMAIN-WILDCARD" && newType == "DOMAIN") {
-            std::string wildRegex = wildcardToRegex(seenValue);
-            if(!wildRegex.empty()) {
-                try {
-                    std::regex re(wildRegex, std::regex::ECMAScript | std::regex::optimize);
-                    if(std::regex_match(newValue, re))
-                        return true;
-                } catch(...) {}
-            }
-        }
-        // DOMAIN-WILDCARD contains DOMAIN-SUFFIX
-        if(seenType == "DOMAIN-WILDCARD" && newType == "DOMAIN-SUFFIX") {
-            std::string wildRegex = wildcardToRegex(seenValue);
-            if(!wildRegex.empty()) {
-                try {
-                    std::regex re(wildRegex, std::regex::ECMAScript | std::regex::optimize);
-                    if(std::regex_match(newValue, re))
-                        return true;
-                    std::string testSub = "a." + newValue;
-                    if(std::regex_match(testSub, re))
-                        return true;
-                } catch(...) {}
-            }
-        }
-
-        // ===== DOMAIN (exact) =====
-        if(seenType == "DOMAIN" && newType == "DOMAIN" && newValue == seenValue)
+        // DOMAIN-WILDCARD (via Wildcard containment check)
+        if (!domainWildcards_.empty() && checkWildcardContainment(newValue))
             return true;
+    }
 
-        // ===== DOMAIN-REGEX =====
-        if(seenType == "DOMAIN-REGEX" && newType == "DOMAIN-REGEX") {
-            if(newValue == seenValue)
+    // ===== DOMAIN-REGEX =====
+    if (typeView == "DOMAIN-REGEX")
+    {
+        for (const auto &seen : domainRegex_)
+        {
+            string_size spos = seen.find(',');
+            if (spos == std::string::npos) continue;
+            std::string_view seenPayload(seen.data() + spos + 1, seen.size() - spos - 1);
+            std::string seenVal(seenPayload);
+            if (seenVal.size() >= 11) {
+                std::string_view nr(seenVal.data() + seenVal.size() - 11, 11);
+                if (nr == ",no-resolve") seenVal = seenVal.substr(0, seenVal.size() - 11);
+            }
+            if (newValue == seenVal)
                 return true;
         }
-        if(seenType == "DOMAIN-REGEX" && newType == "DOMAIN") {
-            try {
-                std::regex re(seenValue, std::regex::ECMAScript | std::regex::optimize);
-                if(std::regex_match(newValue, re))
-                    return true;
-            } catch(...) {}
-        }
-        if(seenType == "DOMAIN-REGEX" && newType == "DOMAIN-SUFFIX") {
-            try {
-                std::regex re(seenValue, std::regex::ECMAScript | std::regex::optimize);
-                if(std::regex_match(newValue, re))
-                    return true;
-                std::string testSub = "a." + newValue;
-                if(std::regex_match(testSub, re))
-                    return true;
-            } catch(...) {}
-        }
+    }
 
-        // ===== IP-CIDR =====
-        if(seenType == "IP-CIDR" && newType == "IP-CIDR" && seenNoResolve == newNoResolve) {
-            CIDRInfo inner = parseCIDR(newValue);
-            CIDRInfo outer = parseCIDR(seenValue);
-            if(isCIDRContained(inner, outer))
+    // ===== IP-CIDR =====
+    if (typeView == "IP-CIDR")
+    {
+        CIDRInfo inner = parseCIDR(newValue);
+        if (inner.valid)
+        {
+            // IP-CIDR contains IP-CIDR (via Radix Tree → O(32))
+            if (!ipCIDRs_.empty() && checkCIDRRadix(inner.addr, inner.prefix, newNoResolve))
                 return true;
-        }
-        // IP-CIDR (seen) contains IP-CIDR6 (new): parse new as CIDR; if IPv4-mapped, check containment
-        if(seenType == "IP-CIDR" && newType == "IP-CIDR6" && seenNoResolve == newNoResolve) {
-            CIDRInfo outer = parseCIDR(seenValue);
-            if(outer.valid) {
-                // Try IPv4-mapped IPv6 (::ffff:x.x.x.x) or IPv4-compatible IPv6 (::x.x.x.x)
-                CIDR6Info inner6 = parseCIDR6(newValue);
-                if(inner6.valid) {
-                    // Check if IPv6 address is IPv4-mapped (::ffff:0:0/96) or IPv4-compatible (::/96)
-                    // IPv4-mapped: ::ffff:a.b.c.d → prefix >= 96 and bytes 10-11 are 0xff 0xff
-                    // IPv4-compatible: ::a.b.c.d → prefix >= 96 and bytes 0-11 are all zero
-                    if(inner6.prefix >= 96) {
-                        bool isMapped = (inner6.addr[10] == 0xff && inner6.addr[11] == 0xff);
-                        bool isCompatible = true;
-                        for(int i = 0; i < 12; i++) {
-                            if(inner6.addr[i] != 0) { isCompatible = false; break; }
-                        }
-                        if(isMapped || isCompatible) {
-                            // Extract embedded IPv4 from bytes 12-15
-                            uint32_t ipv4 = ((uint32_t)inner6.addr[12] << 24) |
-                                            ((uint32_t)inner6.addr[13] << 16) |
-                                            ((uint32_t)inner6.addr[14] << 8) |
-                                            (uint32_t)inner6.addr[15];
-                            CIDRInfo inner = {ipv4, 32, true};
-                            // Apply inner prefix mask
-                            if(inner6.prefix > 96) {
-                                uint8_t extraBits = inner6.prefix - 96;
-                                if(extraBits < 32) {
-                                    inner.prefix = extraBits;
-                                    uint32_t mask = (0xFFFFFFFFU << (32 - extraBits));
-                                    inner.addr &= mask;
-                                }
-                            }
-                            if(isCIDRContained(inner, outer))
-                                return true;
-                        }
-                    }
-                }
+            // IP-CIDR6 contains IP-CIDR (via IPv4-mapped embedding, check CIDR6 Radix)
+            if (!ipCIDR6s_.empty())
+            {
+                uint8_t inner6Addr[16] = {0};
+                inner6Addr[10] = 0xff;
+                inner6Addr[11] = 0xff;
+                inner6Addr[12] = (uint8_t)(inner.addr >> 24);
+                inner6Addr[13] = (uint8_t)(inner.addr >> 16);
+                inner6Addr[14] = (uint8_t)(inner.addr >> 8);
+                inner6Addr[15] = (uint8_t)(inner.addr);
+                uint8_t innerPrefix = 96 + inner.prefix;
+                if (innerPrefix > 128) innerPrefix = 128;
+                if (checkCIDR6Radix(inner6Addr, innerPrefix, newNoResolve))
+                    return true;
             }
         }
+    }
 
-
-        // ===== IP-CIDR6 =====
-        if(seenType == "IP-CIDR6" && newType == "IP-CIDR6" && seenNoResolve == newNoResolve) {
-            CIDR6Info inner = parseCIDR6(newValue);
-            CIDR6Info outer = parseCIDR6(seenValue);
-            if(isCIDR6Contained(inner, outer))
+    // ===== IP-CIDR6 =====
+    if (typeView == "IP-CIDR6")
+    {
+        CIDR6Info inner6 = parseCIDR6(newValue);
+        if (inner6.valid)
+        {
+            // IP-CIDR6 contains IP-CIDR6 (via CIDR6 Radix Tree → O(128))
+            if (!ipCIDR6s_.empty() &&
+                checkCIDR6Radix(inner6.addr, inner6.prefix, newNoResolve))
                 return true;
-        }
-        // IP-CIDR6 (seen) contains IP-CIDR (new): see if new value can be embedded into seen's IPv4-mapped range
-        if(seenType == "IP-CIDR6" && newType == "IP-CIDR" && seenNoResolve == newNoResolve) {
-            CIDRInfo inner = parseCIDR(newValue);
-            if(inner.valid) {
-                // Embed the IPv4 into IPv4-mapped format
-                CIDR6Info outer = parseCIDR6(seenValue);
-                if(outer.valid && outer.prefix >= 96) {
-                    // Build IPv4-mapped address from inner IPv4
-                    uint8_t inner6Addr[16] = {0};
-                    // ::ffff:
-                    inner6Addr[10] = 0xff;
-                    inner6Addr[11] = 0xff;
-                    // embedded IPv4
-                    inner6Addr[12] = (uint8_t)(inner.addr >> 24);
-                    inner6Addr[13] = (uint8_t)(inner.addr >> 16);
-                    inner6Addr[14] = (uint8_t)(inner.addr >> 8);
-                    inner6Addr[15] = (uint8_t)(inner.addr);
-                    uint8_t innerPrefix = 96 + inner.prefix;
-                    if(innerPrefix > 128) innerPrefix = 128;
-                    CIDR6Info inner6 = {{{0}}, innerPrefix, true};
-                    memcpy(inner6.addr, inner6Addr, 16);
-                    // Mask inner6 to its prefix
-                    if(inner6.prefix < 128) {
-                        for(int i = 0; i < 16; i++) {
-                            int bits = (int)inner6.prefix - i * 8;
-                            if(bits > 0 && bits < 8) {
-                                uint8_t mask = (uint8_t)(0xFF << (8 - bits));
-                                inner6.addr[i] &= mask;
-                            } else if(bits <= 0) {
-                                inner6.addr[i] = 0;
-                            }
+            // IP-CIDR contains IP-CIDR6 (via IPv4-mapped)
+            if (inner6.prefix >= 96)
+            {
+                bool isMapped = (inner6.addr[10] == 0xff && inner6.addr[11] == 0xff);
+                bool isCompatible = true;
+                for (int i = 0; i < 12; i++)
+                {
+                    if (inner6.addr[i] != 0) { isCompatible = false; break; }
+                }
+                if (isMapped || isCompatible)
+                {
+                    uint32_t ipv4 = ((uint32_t)inner6.addr[12] << 24) |
+                                    ((uint32_t)inner6.addr[13] << 16) |
+                                    ((uint32_t)inner6.addr[14] << 8) |
+                                    (uint32_t)inner6.addr[15];
+                    CIDRInfo inner = {ipv4, 32, true};
+                    if (inner6.prefix > 96)
+                    {
+                        uint8_t extraBits = inner6.prefix - 96;
+                        if (extraBits < 32)
+                        {
+                            inner.prefix = extraBits;
+                            uint32_t mask = (0xFFFFFFFFU << (32 - extraBits));
+                            inner.addr &= mask;
                         }
                     }
-                    if(isCIDR6Contained(inner6, outer))
+                    if (!ipCIDRs_.empty() &&
+                        checkCIDRRadix(inner.addr, inner.prefix, newNoResolve))
                         return true;
                 }
             }
         }
+    }
 
-        // ===== GEOIP (exact match + no-resolve awareness) =====
-        if(seenType == "GEOIP" && newType == "GEOIP" && newValue == seenValue && seenNoResolve == newNoResolve)
-            return true;
-
-        // ===== SRC-IP-CIDR =====
-        if(seenType == "SRC-IP-CIDR" && newType == "SRC-IP-CIDR" && seenNoResolve == newNoResolve) {
-            CIDRInfo inner = parseCIDR(newValue);
-            CIDRInfo outer = parseCIDR(seenValue);
-            if(isCIDRContained(inner, outer))
+    // ===== GEOIP =====
+    if (typeView == "GEOIP")
+    {
+        for (const auto &[seenVal, seenNR] : geoIPs_)
+        {
+            if (newValue == seenVal && newNoResolve == seenNR)
                 return true;
         }
+    }
+
+    // ===== SRC-IP-CIDR =====
+    if (typeView == "SRC-IP-CIDR")
+    {
+        CIDRInfo inner = parseCIDR(newValue);
+        if (inner.valid && !srcIPCIDRs_.empty() &&
+            checkCIDRRadix(inner.addr, inner.prefix, newNoResolve))
+            return true;
     }
 
     return false;
 }
 
+// Type-partitioned wrapper for use in rulesetToClash/rulesetToClashStr
+static bool isContainedBySeen(const std::string &rule, const std::vector<std::string> &seenRules) {
+    // Build a temporary ContainmentIndex from the vector (legacy path for non-optimized callers)
+    // This is only used when old callers pass a vector; the optimized paths use ContainmentIndex directly.
+    ContainmentIndex idx;
+    for (const auto &sr : seenRules)
+        idx.add(sr);
+    return idx.isContained(rule);
+}
+
 // Public wrapper for containment-based dedup (used by /getruleset endpoint)
-bool containmentCheck(const std::string &newKey, const std::vector<std::string> &seenKeys) {
-    return isContainedBySeen(newKey, seenKeys);
+// Accepts a ContainmentIndex directly for O(k) lookup
+bool containmentCheck(const std::string &newKey, const ContainmentIndex &index) {
+    return index.isContained(newKey);
 }
 
 static std::string transformRuleToCommon(string_view_array &temp, const std::string &input, const std::string &group, bool no_resolve_only = false)
@@ -786,14 +1723,13 @@ void rulesetToClash(YAML::Node &base_rule, std::vector<RulesetContent> &ruleset_
     const std::string field_name = new_field_name ? "rules" : "Rule";
     YAML::Node rules;
     size_t total_rules = 0;
-    // Use vector instead of unordered_set for containment-based dedup
-    std::vector<std::string> seenRules;
+    ContainmentIndex seenIndex;
 
     if(dedup && !overwrite_original_rules && base_rule[field_name].IsDefined())
     {
         rules = base_rule[field_name];
         for(size_t i = 0; i < rules.size(); i++)
-            seenRules.emplace_back(getRuleKey(safe_as<std::string>(rules[i])));
+            seenIndex.add(getRuleKey(safe_as<std::string>(rules[i])));
     }
 
     std::vector<std::string_view> temp(4);
@@ -817,12 +1753,12 @@ void rulesetToClash(YAML::Node &base_rule, std::vector<RulesetContent> &ruleset_
             if(dedup)
             {
                 std::string key = getRuleKey(strLine);
-                if(isContainedBySeen(key, seenRules))
+                if(seenIndex.isContained(key))
                 {
                     total_rules++;
                     continue;
                 }
-                seenRules.emplace_back(std::move(key));
+                seenIndex.add(key);
             }
             allRules.emplace_back(strLine);
             total_rules++;
@@ -853,9 +1789,9 @@ void rulesetToClash(YAML::Node &base_rule, std::vector<RulesetContent> &ruleset_
             if(dedup)
             {
                 std::string key = getRuleKey(strLine);
-                if(isContainedBySeen(key, seenRules))
+                if(seenIndex.isContained(key))
                     continue;
-                seenRules.emplace_back(std::move(key));
+                seenIndex.add(key);
             }
             allRules.emplace_back(strLine);
         }
@@ -877,8 +1813,7 @@ std::string rulesetToClashStr(YAML::Node &base_rule, std::vector<RulesetContent>
     std::string output_content = "\n" + field_name + ":\n";
     size_t total_rules = 0;
     string_array provider_names; // track used rule-provider names for collision avoidance
-    // Use vector instead of unordered_set for containment-based dedup
-    std::vector<std::string> seenRules;
+    ContainmentIndex seenIndex;
 
     if(!overwrite_original_rules && base_rule[field_name].IsDefined())
     {
@@ -886,7 +1821,7 @@ std::string rulesetToClashStr(YAML::Node &base_rule, std::vector<RulesetContent>
         {
             std::string origRule = safe_as<std::string>(base_rule[field_name][i]);
             if(dedup)
-                seenRules.emplace_back(getRuleKey(origRule));
+                seenIndex.add(getRuleKey(origRule));
             output_content += "  - " + origRule + "\n";
         }
     }
@@ -974,12 +1909,12 @@ std::string rulesetToClashStr(YAML::Node &base_rule, std::vector<RulesetContent>
             if(dedup)
             {
                 std::string key = getRuleKey(strLine);
-                if(isContainedBySeen(key, seenRules))
+                if(seenIndex.isContained(key))
                 {
                     total_rules++;
                     continue;
                 }
-                seenRules.emplace_back(std::move(key));
+                seenIndex.add(key);
             }
             output_content += "  - " + strLine + "\n";
             total_rules++;
@@ -1010,9 +1945,9 @@ std::string rulesetToClashStr(YAML::Node &base_rule, std::vector<RulesetContent>
             if(dedup)
             {
                 std::string key = getRuleKey(strLine);
-                if(isContainedBySeen(key, seenRules))
+                if(seenIndex.isContained(key))
                     continue;
-                seenRules.emplace_back(std::move(key));
+                seenIndex.add(key);
             }
             output_content += "  - " + strLine + "\n";
             total_rules++;

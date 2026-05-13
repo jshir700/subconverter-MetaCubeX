@@ -242,7 +242,7 @@ std::string getRuleset(RESPONSE_CALLBACK_ARGS)
 
     // Use vector for containment-based dedup; unordered_set only for exact-match
     std::unordered_set<std::string> seenRulesExact;
-    std::vector<std::string> seenRulesContainment;
+    ContainmentIndex seenRulesContainment;
     lineSize = output_content.size();
     output_content.clear();
     output_content.reserve(lineSize);
@@ -301,7 +301,7 @@ std::string getRuleset(RESPONSE_CALLBACK_ARGS)
                             continue;
                         if(containmentCheck(key, seenRulesContainment))
                             continue;
-                        seenRulesContainment.emplace_back(key);
+                        seenRulesContainment.add(key);
                     }
                 }
             }
@@ -345,7 +345,7 @@ std::string getRuleset(RESPONSE_CALLBACK_ARGS)
                             continue;
                         if(containmentCheck(key, seenRulesContainment))
                             continue;
-                        seenRulesContainment.emplace_back(key);
+                        seenRulesContainment.add(key);
                     }
                 }
             }
@@ -364,7 +364,7 @@ std::string getRuleset(RESPONSE_CALLBACK_ARGS)
                             continue;
                         if(containmentCheck(key, seenRulesContainment))
                             continue;
-                        seenRulesContainment.emplace_back(key);
+                        seenRulesContainment.add(key);
                     }
                 }
             }
@@ -401,7 +401,7 @@ std::string getRuleset(RESPONSE_CALLBACK_ARGS)
                             continue;
                         if(containmentCheck(key, seenRulesContainment))
                             continue;
-                        seenRulesContainment.emplace_back(key);
+                        seenRulesContainment.add(key);
                     }
                 }
             }
@@ -428,7 +428,7 @@ std::string getRuleset(RESPONSE_CALLBACK_ARGS)
                             continue;
                         if(containmentCheck(key, seenRulesContainment))
                             continue;
-                        seenRulesContainment.emplace_back(key);
+                        seenRulesContainment.add(key);
                     }
                 }
             }
@@ -488,7 +488,7 @@ std::string getRuleset(RESPONSE_CALLBACK_ARGS)
                         // Containment check against previously seen rules
                         if(containmentCheck(key, seenRulesContainment))
                             continue;
-                        seenRulesContainment.emplace_back(key);
+                        seenRulesContainment.add(key);
                     }
                 }
             }

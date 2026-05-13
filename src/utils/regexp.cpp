@@ -1,5 +1,8 @@
 #include <string>
 #include <cstdarg>
+#include <mutex>
+#include <shared_mutex>
+#include <unordered_map>
 
 /*
 #ifdef USE_STD_REGEX
@@ -12,150 +15,99 @@ using jp = jpcre2::select<char>;
 
 #include "regexp.h"
 
+// PCRE2 regex compilation cache
+// Avoids recompiling the same pattern on every regFind/regMatch/regReplace call
+namespace {
+    struct RegexCache {
+        // Main pattern cache: pattern -> compiled regex
+        std::unordered_map<std::string, jp::Regex> cache;
+        // Modifier suffix cache: pattern|modifier -> compiled regex
+        std::unordered_map<std::string, jp::Regex> modifierCache;
+        mutable std::shared_mutex mutex;
+
+        static std::string modifierKey(const std::string &pattern, const std::string &modifiers) {
+            return pattern + "|" + modifiers;
+        }
+
+        jp::Regex* getOrCompile(const std::string &pattern, const std::string &modifiers, uint32_t options) {
+            std::string key = modifierKey(pattern, modifiers);
+
+            // Fast path: read-lock lookup
+            {
+                std::shared_lock<std::shared_mutex> lock(mutex);
+                auto it = modifierCache.find(key);
+                if (it != modifierCache.end())
+                    return &it->second;
+            }
+
+            // Slow path: compile (under write lock)
+            std::unique_lock<std::shared_mutex> lock(mutex);
+            auto it = modifierCache.find(key);
+            if (it != modifierCache.end())
+                return &it->second;
+
+            jp::Regex reg;
+            reg.setPattern(pattern).addModifier(modifiers.c_str()).addPcre2Option(options).compile();
+            if (!reg) {
+                // Store invalid regex to avoid recompilation attempts
+                modifierCache[key] = std::move(reg);
+                return nullptr;
+            }
+
+            auto result = &modifierCache.emplace(key, std::move(reg)).first->second;
+            // Keep cache bounded: if too large, clear it
+            if (modifierCache.size() > 1024) {
+                modifierCache.clear();
+                // Re-insert this entry
+                jp::Regex reg2;
+                reg2.setPattern(pattern).addModifier(modifiers.c_str()).addPcre2Option(options).compile();
+                modifierCache[key] = std::move(reg2);
+                result = &modifierCache.find(key)->second;
+            }
+            return result;
+        }
+    };
+
+    RegexCache& getRegexCache() {
+        static RegexCache instance;
+        return instance;
+    }
+
+    uint32_t pcre2_options(bool is_utf) {
+        uint32_t opts = PCRE2_ALT_BSUX;
+        if (is_utf) opts |= PCRE2_UTF;
+        return opts;
+    }
+} // anonymous namespace
+
 /*
 #ifdef USE_STD_REGEX
 bool regValid(const std::string &reg)
-{
-    try
-    {
-        std::regex r(reg, std::regex::ECMAScript);
-        return true;
-    }
-    catch (std::regex_error &e)
-    {
-        return false;
-    }
-}
-
-bool regFind(const std::string &src, const std::string &match)
-{
-    try
-    {
-        std::regex::flag_type flags = std::regex::extended | std::regex::ECMAScript;
-        std::string target = match;
-        if(match.find("(?i)") == 0)
-        {
-            target.erase(0, 4);
-            flags |= std::regex::icase;
-        }
-        std::regex reg(target, flags);
-        return regex_search(src, reg);
-    }
-    catch (std::regex_error &e)
-    {
-        return false;
-    }
-}
-
-std::string regReplace(const std::string &src, const std::string &match, const std::string &rep)
-{
-    std::string result = "";
-    try
-    {
-        std::regex::flag_type flags = std::regex::extended | std::regex::ECMAScript;
-        std::string target = match;
-        if(match.find("(?i)") == 0)
-        {
-            target.erase(0, 4);
-            flags |= std::regex::icase;
-        }
-        std::regex reg(target, flags);
-        regex_replace(back_inserter(result), src.begin(), src.end(), reg, rep);
-    }
-    catch (std::regex_error &e)
-    {
-        result = src;
-    }
-    return result;
-}
-
-bool regMatch(const std::string &src, const std::string &match)
-{
-    try
-    {
-        std::regex::flag_type flags = std::regex::extended | std::regex::ECMAScript;
-        std::string target = match;
-        if(match.find("(?i)") == 0)
-        {
-            target.erase(0, 4);
-            flags |= std::regex::icase;
-        }
-        std::regex reg(target, flags);
-        return regex_match(src, reg);
-    }
-    catch (std::regex_error &e)
-    {
-        return false;
-    }
-}
-
-int regGetMatch(const std::string &src, const std::string &match, size_t group_count, ...)
-{
-    try
-    {
-        std::regex::flag_type flags = std::regex::extended | std::regex::ECMAScript;
-        std::string target = match;
-        if(match.find("(?i)") == 0)
-        {
-            target.erase(0, 4);
-            flags |= std::regex::icase;
-        }
-        std::regex reg(target, flags);
-        std::smatch result;
-        if(regex_search(src.cbegin(), src.cend(), result, reg))
-        {
-            if(result.size() < group_count - 1)
-                return -1;
-            va_list vl;
-            va_start(vl, group_count);
-            size_t index = 0;
-            while(group_count)
-            {
-                std::string* arg = va_arg(vl, std::string*);
-                if(arg != NULL)
-                    *arg = std::move(result[index]);
-                index++;
-                group_count--;
-            }
-            va_end(vl);
-        }
-        else
-            return -2;
-        return 0;
-    }
-    catch (std::regex_error&)
-    {
-        return -3;
-    }
-}
-
+...
 #else
 */
 bool regMatch(const std::string &src, const std::string &match)
 {
-    jp::Regex reg;
-    reg.setPattern(match).addModifier("m").addPcre2Option(PCRE2_ANCHORED|PCRE2_ENDANCHORED|PCRE2_UTF).compile();
-    if(!reg)
+    auto *reg = getRegexCache().getOrCompile(match, "m", PCRE2_ANCHORED|PCRE2_ENDANCHORED|PCRE2_UTF);
+    if (!reg || !(*reg))
         return false;
-    return reg.match(src, "g");
+    return reg->match(src, "g");
 }
 
 bool regFind(const std::string &src, const std::string &match)
 {
-    jp::Regex reg;
-    reg.setPattern(match).addModifier("m").addPcre2Option(PCRE2_UTF|PCRE2_ALT_BSUX).compile();
-    if(!reg)
+    auto *reg = getRegexCache().getOrCompile(match, "m", PCRE2_UTF|PCRE2_ALT_BSUX);
+    if (!reg || !(*reg))
         return false;
-    return reg.match(src, "g");
+    return reg->match(src, "g");
 }
 
 std::string regReplace(const std::string &src, const std::string &match, const std::string &rep, bool global, bool multiline)
 {
-    jp::Regex reg;
-    reg.setPattern(match).addModifier(multiline ? "m" : "").addPcre2Option(PCRE2_UTF|PCRE2_MULTILINE|PCRE2_ALT_BSUX).compile();
-    if(!reg)
+    auto *reg = getRegexCache().getOrCompile(match, multiline ? "m" : "", PCRE2_UTF|PCRE2_MULTILINE|PCRE2_ALT_BSUX);
+    if (!reg || !(*reg))
         return src;
-    return reg.replace(src, rep, global ? "gEx" : "Ex");
+    return reg->replace(src, rep, global ? "gEx" : "Ex");
 }
 
 bool regValid(const std::string &reg)
@@ -189,11 +141,13 @@ int regGetMatch(const std::string &src, const std::string &match, size_t group_c
 
 std::vector<std::string> regGetAllMatch(const std::string &src, const std::string &match, bool group_only)
 {
-    jp::Regex reg;
-    reg.setPattern(match).addModifier("m").addPcre2Option(PCRE2_UTF|PCRE2_ALT_BSUX).compile();
+    auto *reg = getRegexCache().getOrCompile(match, "m", PCRE2_UTF|PCRE2_ALT_BSUX);
+    if (!reg || !(*reg))
+        return {};
+
     jp::VecNum vec_num;
     jp::RegexMatch rm;
-    size_t count = rm.setRegexObject(&reg).setSubject(src).setNumberedSubstringVector(&vec_num).setModifier("gm").match();
+    size_t count = rm.setRegexObject(reg).setSubject(src).setNumberedSubstringVector(&vec_num).setModifier("gm").match();
     std::vector<std::string> result;
     if(!count)
         return result;
