@@ -1,6 +1,7 @@
 #include <string>
 #include <mutex>
 #include <unordered_set>
+#include <sys/stat.h>
 #include <toml.hpp>
 
 #include "config/binding.h"
