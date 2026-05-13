@@ -141,6 +141,7 @@ std::string getRuleset(RESPONSE_CALLBACK_ARGS)
     int *status_code = &response.status_code;
     /// type: 1 for Surge, 2 for Quantumult X, 3 for Clash domain rule-provider, 4 for Clash ipcidr rule-provider, 5 for Surge DOMAIN-SET, 6 for Clash classical ruleset
     std::string url = urlSafeBase64Decode(getUrlArg(argument, "url")), type = getUrlArg(argument, "type"), group = urlSafeBase64Decode(getUrlArg(argument, "group"));
+    std::string argUserAgent = getUrlArg(argument, "ua");
     std::string output_content, dummy;
     int type_int = to_int(type, 0);
 
@@ -148,6 +149,15 @@ std::string getRuleset(RESPONSE_CALLBACK_ARGS)
     {
         *status_code = 400;
         return "Invalid request!";
+    }
+
+    // Apply fetch_timeout from URL param if present
+    std::string argFetchTimeout = getUrlArg(argument, "fetch_timeout");
+    long saved_timeout = global.fetch_timeout;
+    if(!argFetchTimeout.empty())
+    {
+        long ft = to_int(argFetchTimeout, 0);
+        if(ft > 0) global.fetch_timeout = ft;
     }
 
     std::string proxy = parseProxy(global.proxyRuleset);
@@ -163,17 +173,23 @@ std::string getRuleset(RESPONSE_CALLBACK_ARGS)
              LOG_LEVEL_INFO);
 
     // Propagate incoming request's User-Agent to ruleset configs that don't have their own UA
-    if (request.headers.contains("User-Agent")) {
-        const std::string &req_ua = request.headers.at("User-Agent");
-        for (auto &cfg : confs) {
-            if (cfg.UserAgent.empty()) {
-                cfg.UserAgent = req_ua;
+    std::string effective_ua = argUserAgent;
+    if(effective_ua.empty() && request.headers.contains("User-Agent"))
+        effective_ua = request.headers.at("User-Agent");
+    if(!effective_ua.empty())
+    {
+        for(auto &cfg : confs)
+        {
+            if(cfg.UserAgent.empty())
+            {
+                cfg.UserAgent = effective_ua;
                 writeLog(0, "[getruleset] propagated UA to ruleset config: url='" + cfg.Url + "'", LOG_LEVEL_INFO);
             }
         }
     }
 
-    for (auto &cfg : confs) {
+    for(auto &cfg : confs)
+    {
         writeLog(0, "[getruleset] config: url='" + cfg.Url + "', group='" + cfg.Group + "', UA='" +
                        (cfg.UserAgent.empty() ? "(default)" : cfg.UserAgent) + "'",
                  LOG_LEVEL_INFO);
@@ -189,6 +205,9 @@ std::string getRuleset(RESPONSE_CALLBACK_ARGS)
                  LOG_LEVEL_INFO);
         output_content += convertRuleset(content, x.rule_type);
     }
+
+    // Restore original fetch_timeout
+    global.fetch_timeout = saved_timeout;
 
     if(output_content.empty())
     {
@@ -221,7 +240,9 @@ std::string getRuleset(RESPONSE_CALLBACK_ARGS)
         return 0;
     };
 
-    std::unordered_set<std::string> seenRules;
+    // Use vector for containment-based dedup; unordered_set only for exact-match
+    std::unordered_set<std::string> seenRulesExact;
+    std::vector<std::string> seenRulesContainment;
     lineSize = output_content.size();
     output_content.clear();
     output_content.reserve(lineSize);
@@ -231,6 +252,11 @@ std::string getRuleset(RESPONSE_CALLBACK_ARGS)
 
     while(getline(ss, strLine, delimiter))
     {
+        // Strip trailing \r BEFORE any processing (CRLF line ending fix)
+        // getline with \n delimiter leaves \r on the string for CRLF files
+        if(!strLine.empty() && strLine.back() == '\r')
+            strLine.pop_back();
+
         if(strFind(strLine, "//"))
         {
             strLine.erase(strLine.find("//"));
@@ -241,14 +267,107 @@ std::string getRuleset(RESPONSE_CALLBACK_ARGS)
         case 2:
             if(!std::any_of(QuanXRuleTypes.begin(), QuanXRuleTypes.end(), [&strLine](const std::string& type){return startsWith(strLine, type);}))
                 continue;
+            {
+                // Dedup for Quantumult X format (type=2): extract TYPE,VALUE key
+                string_size dpos = strLine.find(',');
+                if(dpos != std::string::npos) {
+                    std::string type = strLine.substr(0, dpos);
+                    std::string key;
+
+                    // Build dedup key: TYPE,VALUE
+                    // For IP-CIDR/IP-CIDR6: include no-resolve flag in the key
+                    string_size dpos2 = strLine.find(',', dpos + 1);
+                    if(dpos2 == std::string::npos) {
+                        // Only 1 comma: TYPE,VALUE format
+                        key = type + "," + strLine.substr(dpos + 1);
+                    } else {
+                        // At least 2 commas: extract VALUE between first and second comma
+                        std::string value = strLine.substr(dpos + 1, dpos2 - dpos - 1);
+
+                        // For IP-CIDR/IP-CIDR6: include no-resolve flag
+                        if(type == "IP-CIDR" || type == "IP-CIDR6") {
+                            if(strLine.find(",no-resolve") != std::string::npos)
+                                key = type + "," + value + ",no-resolve";
+                            else
+                                key = type + "," + value;
+                        } else {
+                            key = type + "," + value;
+                        }
+                    }
+
+                    // Containment-based dedup
+                    if(argDedup.get(true)) {
+                        if(!seenRulesExact.emplace(key).second)
+                            continue;
+                        if(containmentCheck(key, seenRulesContainment))
+                            continue;
+                        seenRulesContainment.emplace_back(key);
+                    }
+                }
+            }
             break;
         case 1:
             if(!std::any_of(SurgeRuleTypes.begin(), SurgeRuleTypes.end(), [&strLine](const std::string& type){return startsWith(strLine, type);}))
                 continue;
+            {
+                // Dedup for Surge format (type=1): extract TYPE,VALUE key
+                string_size dpos = strLine.find(',');
+                if(dpos != std::string::npos) {
+                    std::string type = strLine.substr(0, dpos);
+                    std::string key;
+
+                    // Build dedup key: TYPE,VALUE
+                    // For IP-CIDR/IP-CIDR6: include no-resolve flag in the key
+                    // so that IP-CIDR,10.0.0.0/8 and IP-CIDR,10.0.0.0/8,no-resolve
+                    // are treated as separate rules (not deduped against each other).
+                    string_size dpos2 = strLine.find(',', dpos + 1);
+                    if(dpos2 == std::string::npos) {
+                        // Only 1 comma: TYPE,VALUE format
+                        key = type + "," + strLine.substr(dpos + 1);
+                    } else {
+                        // At least 2 commas: extract VALUE between first and second comma
+                        std::string value = strLine.substr(dpos + 1, dpos2 - dpos - 1);
+
+                        // For IP-CIDR/IP-CIDR6: include no-resolve flag
+                        if(type == "IP-CIDR" || type == "IP-CIDR6") {
+                            if(strLine.find(",no-resolve") != std::string::npos)
+                                key = type + "," + value + ",no-resolve";
+                            else
+                                key = type + "," + value;
+                        } else {
+                            key = type + "," + value;
+                        }
+                    }
+
+                    // Containment-based dedup
+                    if(argDedup.get(true)) {
+                        if(!seenRulesExact.emplace(key).second)
+                            continue;
+                        if(containmentCheck(key, seenRulesContainment))
+                            continue;
+                        seenRulesContainment.emplace_back(key);
+                    }
+                }
+            }
             break;
         case 3:
             if(!startsWith(strLine, "DOMAIN-SUFFIX,") && !startsWith(strLine, "DOMAIN,"))
                 continue;
+            {
+                // Dedup for Clash domain rule-provider (type=3): extract TYPE,VALUE key
+                string_size dpos = strLine.find(',');
+                if(dpos != std::string::npos) {
+                    std::string type = strLine.substr(0, dpos);
+                    std::string key = type + "," + strLine.substr(dpos + 1);
+                    if(argDedup.get(true)) {
+                        if(!seenRulesExact.emplace(key).second)
+                            continue;
+                        if(containmentCheck(key, seenRulesContainment))
+                            continue;
+                        seenRulesContainment.emplace_back(key);
+                    }
+                }
+            }
             if(filterLine())
                 continue;
             output_content += "  - '";
@@ -260,6 +379,32 @@ std::string getRuleset(RESPONSE_CALLBACK_ARGS)
         case 4:
             if(!startsWith(strLine, "IP-CIDR,") && !startsWith(strLine, "IP-CIDR6,"))
                 continue;
+            {
+                // Dedup for Clash ipcidr rule-provider (type=4): extract TYPE,VALUE key
+                // For IP-CIDR/IP-CIDR6: include no-resolve flag in the key
+                string_size dpos = strLine.find(',');
+                if(dpos != std::string::npos) {
+                    std::string type = strLine.substr(0, dpos);
+                    std::string key;
+                    string_size dpos2 = strLine.find(',', dpos + 1);
+                    if(dpos2 == std::string::npos) {
+                        key = type + "," + strLine.substr(dpos + 1);
+                    } else {
+                        std::string value = strLine.substr(dpos + 1, dpos2 - dpos - 1);
+                        if(strLine.find(",no-resolve") != std::string::npos)
+                            key = type + "," + value + ",no-resolve";
+                        else
+                            key = type + "," + value;
+                    }
+                    if(argDedup.get(true)) {
+                        if(!seenRulesExact.emplace(key).second)
+                            continue;
+                        if(containmentCheck(key, seenRulesContainment))
+                            continue;
+                        seenRulesContainment.emplace_back(key);
+                    }
+                }
+            }
             if(filterLine())
                 continue;
             output_content += "  - '";
@@ -269,6 +414,24 @@ std::string getRuleset(RESPONSE_CALLBACK_ARGS)
         case 5:
             if(!startsWith(strLine, "DOMAIN-SUFFIX,") && !startsWith(strLine, "DOMAIN,"))
                 continue;
+            {
+                // Dedup for Surge DOMAIN-SET format (type=5): extract TYPE,VALUE key
+                // DOMAIN-SET only supports DOMAIN-SUFFIX and DOMAIN rules
+                string_size dpos = strLine.find(',');
+                if(dpos != std::string::npos) {
+                    std::string type = strLine.substr(0, dpos);
+                    std::string key = type + "," + strLine.substr(dpos + 1);
+
+                    // Containment-based dedup
+                    if(argDedup.get(true)) {
+                        if(!seenRulesExact.emplace(key).second)
+                            continue;
+                        if(containmentCheck(key, seenRulesContainment))
+                            continue;
+                        seenRulesContainment.emplace_back(key);
+                    }
+                }
+            }
             if(filterLine())
                 continue;
             if(strLine[posb - 2] == 'X')
@@ -282,11 +445,20 @@ std::string getRuleset(RESPONSE_CALLBACK_ARGS)
             {
                 string_size dpos = strLine.find(',');
                 if(dpos != std::string::npos) {
+                    std::string type = strLine.substr(0, dpos);
+                    std::string key;
+
+                    // Build dedup key: TYPE,VALUE or TYPE,VALUE,no-resolve
+                    // The convertRuleset output may have 1 comma (TYPE,VALUE) or
+                    // 2 commas (TYPE,VALUE,no-resolve). Handle both cases.
                     string_size dpos2 = strLine.find(',', dpos + 1);
-                    if(dpos2 != std::string::npos) {
-                        std::string type = strLine.substr(0, dpos);
+                    if(dpos2 == std::string::npos) {
+                        // Only 1 comma: TYPE,VALUE format (no group field)
+                        key = type + "," + strLine.substr(dpos + 1);
+                    } else {
+                        // At least 2 commas: extract VALUE between first and second comma
                         std::string value = strLine.substr(dpos + 1, dpos2 - dpos - 1);
-                        std::string key;
+
                         // IP-CIDR/IP-CIDR6: include no-resolve flag
                         if(type == "IP-CIDR" || type == "IP-CIDR6") {
                             if(strLine.find(",no-resolve") != std::string::npos)
@@ -306,8 +478,17 @@ std::string getRuleset(RESPONSE_CALLBACK_ARGS)
                         else {
                             key = type + "," + value;
                         }
-                        if(argDedup.get(true) && !seenRules.emplace(key).second)
+                    }
+
+                    // Containment-based dedup: check if this rule's match-set is contained by any seen rule
+                    if(argDedup.get(true)) {
+                        // Quick exact-match check first (faster)
+                        if(!seenRulesExact.emplace(key).second)
                             continue;
+                        // Containment check against previously seen rules
+                        if(containmentCheck(key, seenRulesContainment))
+                            continue;
+                        seenRulesContainment.emplace_back(key);
                     }
                 }
             }
@@ -317,9 +498,6 @@ std::string getRuleset(RESPONSE_CALLBACK_ARGS)
         }
 
         lineSize = strLine.size();
-        if(lineSize && strLine[lineSize - 1] == '\r') //remove line break
-            strLine.erase(--lineSize);
-
         if(!strLine.empty() && (strLine[0] != ';' && strLine[0] != '#' && !(lineSize >= 2 && strLine[0] == '/' && strLine[1] == '/')))
         {
             if(type_int == 2)
@@ -717,9 +895,6 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
     template_args tpl_args;
     tpl_args.global_vars = global.templateVars;
     tpl_args.request_params = req_arg_map;
-    // Inject resolved User-Agent into template context as {{ global.ua }}
-    if(!argUserAgent.empty())
-        tpl_args.global_vars["ua"] = argUserAgent;
 
     /// check for proxy settings
     std::string proxy = parseProxy(global.proxySubscription);
@@ -913,6 +1088,13 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
         script_context_init(*ext.js_context);
     }
 
+    // fetch_timeout already declared in string values section above
+    if(!argFetchTimeout.empty())
+    {
+        long ft = to_int(argFetchTimeout, 0);
+        if(ft > 0) global.fetch_timeout = ft;
+    }
+
     //start parsing urls
     RegexMatchConfigs stream_temp = safe_get_streams(), time_temp = safe_get_times();
 
@@ -920,7 +1102,6 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
     string_array urls;
     std::vector<Proxy> nodes, insert_nodes;
     int groupID = 0;
-    long lFetchTimeout = !argFetchTimeout.empty() ? to_int(argFetchTimeout, 0) : 0;
 
     parse_settings parse_set;
     parse_set.proxy = &proxy;
@@ -932,7 +1113,7 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
     parse_set.authorized = authorized;
     parse_set.request_header = &request.headers;
     parse_set.custom_user_agent = &argUserAgent;
-    parse_set.fetch_timeout = &lFetchTimeout;
+    parse_set.fetch_timeout = &global.fetch_timeout;
     parse_set.js_runtime = ext.js_runtime;
     parse_set.js_context = ext.js_context;
 
@@ -2185,12 +2366,6 @@ std::string renderTemplate(RESPONSE_CALLBACK_ARGS)
         req_arg_map[x.first] = x.second;
     }
     tpl_args.request_params = req_arg_map;
-    // Inject &ua= parameter into template context as {{ global.ua }}
-    std::string tpl_ua = getUrlArg(argument, "ua");
-    if(tpl_ua.empty() && !global.user_agent.empty())
-        tpl_ua = global.user_agent;
-    if(!tpl_ua.empty())
-        tpl_args.global_vars["ua"] = tpl_ua;
 
     std::string output_content;
     if(render_template(template_content, tpl_args, output_content, global.templatePath) != 0)

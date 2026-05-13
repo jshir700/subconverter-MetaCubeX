@@ -40,4 +40,8 @@ std::string rulesetToClashStr(YAML::Node &base_rule, std::vector<RulesetContent>
 void rulesetToSurge(INIReader &base_rule, std::vector<RulesetContent> &ruleset_content_array, int surge_ver, bool overwrite_original_rules, const std::string& remote_path_prefix);
 void rulesetToSingBox(rapidjson::Document &base_rule, std::vector<RulesetContent> &ruleset_content_array, bool overwrite_original_rules);
 
+// Containment-based dedup for Clash classical rules (TYPE,VALUE format)
+// Returns true if 'newKey' (TYPE,VALUE) is contained by any entry in 'seenKeys'
+bool containmentCheck(const std::string &newKey, const std::vector<std::string> &seenKeys);
+
 #endif // RULECONVERT_H_INCLUDED
