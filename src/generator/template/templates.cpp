@@ -3,6 +3,7 @@
 #include <shared_mutex>
 #include <map>
 #include <sstream>
+#include <unordered_set>
 #include <filesystem>
 #include <inja.hpp>
 #include <nlohmann/json.hpp>
@@ -16,6 +17,7 @@
 #include "utils/urlencode.h"
 #include "utils/yamlcpp_extra.h"
 #include "templates.h"
+#include "generator/config/ruleconvert.h"
 
 namespace inja
 {
@@ -339,7 +341,7 @@ std::string findFileName(const std::string &path)
     return path.substr(pos + 1, pos2 - pos - 1);
 }
 
-int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &ruleset_content_array, const std::string &remote_path_prefix, bool script, bool overwrite_original_rules)
+int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &ruleset_content_array, const std::string &remote_path_prefix, bool script, bool overwrite_original_rules, bool dedup)
 {
     nlohmann::json data;
     std::string match_group, geoips, retrieved_rules;
@@ -354,6 +356,7 @@ int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &rulese
     string_array rules;
     int index = 0;
     bool ruleset_inline_expand = false;                     // true when provider=false for SURGE-type rulesets
+    std::unordered_set<std::string> dedupKeys;
 
     if(!overwrite_original_rules && base_rule["rules"].IsDefined())
         rules = safe_as<string_array>(base_rule["rules"]);
@@ -414,6 +417,11 @@ int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &rulese
                             continue;
                         strLine = trimWhitespace(strLine, true, true);
                         if(strLine.empty()) continue;
+                        if(dedup) {
+                            std::string key = getRuleKey(strLine);
+                            if(!dedupKeys.emplace(key).second)
+                                continue;
+                        }
                         strLine += "," + rule_group;
                         if(count_least(strLine, ',', 3))
                             strLine = regReplace(strLine, "^(.*?,.*?)(,.*)(,.*)$", "$1$3$2");
@@ -558,6 +566,11 @@ int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &rulese
                     // No RULE-SET entries are generated; all rules are expanded inline.
                     strLine = trimWhitespace(strLine, true, true);
                     if(strLine.empty()) continue;
+                    if(dedup) {
+                        std::string key = getRuleKey(strLine);
+                        if(!dedupKeys.emplace(key).second)
+                            continue;
+                    }
                     strLine += "," + rule_group;
                     if(count_least(strLine, ',', 3))
                         strLine = regReplace(strLine, "^(.*?,.*?)(,.*)(,.*)$", "$1$3$2");
@@ -577,6 +590,11 @@ int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &rulese
                     }
                     else
                     {
+                        if(dedup) {
+                            std::string key = getRuleKey(strLine);
+                            if(!dedupKeys.emplace(key).second)
+                                continue;
+                        }
                         vArray = split(strLine, ",");
                         if(vArray.size() < 2)
                         {

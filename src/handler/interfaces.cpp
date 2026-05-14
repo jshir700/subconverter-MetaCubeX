@@ -240,9 +240,7 @@ std::string getRuleset(RESPONSE_CALLBACK_ARGS)
         return 0;
     };
 
-    // Use vector for containment-based dedup; unordered_set only for exact-match
     std::unordered_set<std::string> seenRulesExact;
-    ContainmentIndex seenRulesContainment;
     lineSize = output_content.size();
     output_content.clear();
     output_content.reserve(lineSize);
@@ -295,13 +293,9 @@ std::string getRuleset(RESPONSE_CALLBACK_ARGS)
                         }
                     }
 
-                    // Containment-based dedup
                     if(argDedup.get(true)) {
                         if(!seenRulesExact.emplace(key).second)
                             continue;
-                        if(containmentCheck(key, seenRulesContainment))
-                            continue;
-                        seenRulesContainment.add(key);
                     }
                 }
             }
@@ -339,13 +333,9 @@ std::string getRuleset(RESPONSE_CALLBACK_ARGS)
                         }
                     }
 
-                    // Containment-based dedup
                     if(argDedup.get(true)) {
                         if(!seenRulesExact.emplace(key).second)
                             continue;
-                        if(containmentCheck(key, seenRulesContainment))
-                            continue;
-                        seenRulesContainment.add(key);
                     }
                 }
             }
@@ -362,9 +352,6 @@ std::string getRuleset(RESPONSE_CALLBACK_ARGS)
                     if(argDedup.get(true)) {
                         if(!seenRulesExact.emplace(key).second)
                             continue;
-                        if(containmentCheck(key, seenRulesContainment))
-                            continue;
-                        seenRulesContainment.add(key);
                     }
                 }
             }
@@ -399,9 +386,6 @@ std::string getRuleset(RESPONSE_CALLBACK_ARGS)
                     if(argDedup.get(true)) {
                         if(!seenRulesExact.emplace(key).second)
                             continue;
-                        if(containmentCheck(key, seenRulesContainment))
-                            continue;
-                        seenRulesContainment.add(key);
                     }
                 }
             }
@@ -422,13 +406,9 @@ std::string getRuleset(RESPONSE_CALLBACK_ARGS)
                     std::string type = strLine.substr(0, dpos);
                     std::string key = type + "," + strLine.substr(dpos + 1);
 
-                    // Containment-based dedup
                     if(argDedup.get(true)) {
                         if(!seenRulesExact.emplace(key).second)
                             continue;
-                        if(containmentCheck(key, seenRulesContainment))
-                            continue;
-                        seenRulesContainment.add(key);
                     }
                 }
             }
@@ -480,15 +460,9 @@ std::string getRuleset(RESPONSE_CALLBACK_ARGS)
                         }
                     }
 
-                    // Containment-based dedup: check if this rule's match-set is contained by any seen rule
                     if(argDedup.get(true)) {
-                        // Quick exact-match check first (faster)
                         if(!seenRulesExact.emplace(key).second)
                             continue;
-                        // Containment check against previously seen rules
-                        if(containmentCheck(key, seenRulesContainment))
-                            continue;
-                        seenRulesContainment.add(key);
                     }
                 }
             }
