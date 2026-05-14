@@ -384,6 +384,11 @@ int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &rulese
             }
             if(startsWith(strLine, "FINAL"))
                 strLine.replace(0, 5, "MATCH");
+            if(dedup) {
+                std::string key = getRuleKey(strLine);
+                if(!dedupKeys.emplace(key).second)
+                    continue;
+            }
             strLine += "," + rule_group;
             if(count_least(strLine, ',', 3))
                 strLine = regReplace(strLine, "^(.*?,.*?)(,.*)(,.*)$", "$1$3$2");
