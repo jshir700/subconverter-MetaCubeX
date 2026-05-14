@@ -77,11 +77,19 @@ static httplib::Server::Handler makeHandler(const responseRoute &rr)
         {
             content_type = rr.content_type;
         }
-        // gzip compression: only when &gzip=true URL param is set (opt-in)
+        // gzip compression:
+        //   - &gzip=true/false  → manual override
+        //   - &rules-provider=false → auto-enable (inline expansion = large response)
+        //   - otherwise → off
         bool use_gzip = false;
         {
             auto gzip_it = request.params.find("gzip");
-            use_gzip = (gzip_it != request.params.end() && gzip_it->second == "true");
+            if(gzip_it != request.params.end())
+                use_gzip = (gzip_it->second == "true");
+            else {
+                auto rp_it = request.params.find("rules-provider");
+                use_gzip = (rp_it != request.params.end() && rp_it->second == "false");
+            }
         }
         if(result.size() > 10240 && use_gzip)
         {
