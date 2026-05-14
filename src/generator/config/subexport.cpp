@@ -250,7 +250,8 @@ static void emitProxyToEmitter(YAML::Emitter &out, Proxy &x, extra_settings &ext
     if (!x.RawParams.empty()) {
         std::string protocol = x.RawParams.count("type") ? x.RawParams["type"] : "";
         for (const auto &[key, value] : x.RawParams) {
-            if (key == "name" || key == "server" || key == "port")
+            if (key == "name" || key == "server" || key == "port" ||
+                key == "udp" || key == "tfo" || key == "skip-cert-verify")
                 continue;
             if (!value.empty() && (value[0] == '{' || value[0] == '[')) {
                 // JSON values need YAML::Node parsing for correct emission
