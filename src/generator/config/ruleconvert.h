@@ -11,6 +11,7 @@
 #include <rapidjson/document.h>
 
 #include "utils/ini_reader/ini_reader.h"
+#include "utils/stl_extra.h"
 
 enum ruleset_type
 {
@@ -42,5 +43,8 @@ void rulesetToClash(YAML::Node &base_rule, std::vector<RulesetContent> &ruleset_
 std::string rulesetToClashStr(YAML::Node &base_rule, std::vector<RulesetContent> &ruleset_content_array, bool overwrite_original_rules, bool new_field_name, bool dedup = true);
 void rulesetToSurge(INIReader &base_rule, std::vector<RulesetContent> &ruleset_content_array, int surge_ver, bool overwrite_original_rules, const std::string& remote_path_prefix);
 void rulesetToSingBox(rapidjson::Document &base_rule, std::vector<RulesetContent> &ruleset_content_array, bool overwrite_original_rules);
+
+// Clash-supported rule type prefixes — used to filter non-Clash types from inline expansion
+extern const string_array ClashRuleTypes;
 
 #endif // RULECONVERT_H_INCLUDED

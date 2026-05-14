@@ -18,7 +18,7 @@
 
 /// rule type lists
 #define basic_types "DOMAIN", "DOMAIN-SUFFIX", "DOMAIN-KEYWORD", "IP-CIDR", "SRC-IP-CIDR", "GEOIP", "MATCH", "FINAL"
-string_array ClashRuleTypes = {basic_types, "IP-CIDR6", "SRC-PORT", "DST-PORT", "PROCESS-NAME",
+const string_array ClashRuleTypes = {basic_types, "IP-CIDR6", "SRC-PORT", "DST-PORT", "PROCESS-NAME",
     "DOMAIN-REGEX", "DOMAIN-WILDCARD", "GEOSITE", "IP-SUFFIX", "IP-ASN",
     "SRC-GEOIP", "SRC-IP-ASN", "SRC-IP-SUFFIX",
     "IN-PORT", "IN-TYPE", "IN-USER", "IN-NAME",

@@ -422,11 +422,20 @@ int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &rulese
                             continue;
                         strLine = trimWhitespace(strLine, true, true);
                         if(strLine.empty()) continue;
-                        // Clash does not support USER-AGENT or URL-REGEX rules
-                        if(startsWith(strLine, "USER-AGENT,"))
-                            continue;
-                        if(startsWith(strLine, "URL-REGEX,"))
-                            strLine = "DOMAIN-REGEX," + strLine.substr(10);
+                        // Filter non-Clash rule types (PROTOCOL, IP-VERSION, USER-AGENT, etc.)
+                        // URL-REGEX can be converted to DOMAIN-REGEX; everything else is skipped
+                        {
+                            bool is_clash_rule = false;
+                            for(const auto &t : ClashRuleTypes)
+                                if(startsWith(strLine, t)) { is_clash_rule = true; break; }
+                            if(!is_clash_rule)
+                            {
+                                if(startsWith(strLine, "URL-REGEX,"))
+                                    strLine = "DOMAIN-REGEX," + strLine.substr(10);
+                                else
+                                    continue;
+                            }
+                        }
                         if(dedup) {
                             std::string key = getRuleKey(strLine);
                             if(!dedupKeys.emplace(key).second)
@@ -582,11 +591,20 @@ int renderClashScript(YAML::Node &base_rule, std::vector<RulesetContent> &rulese
                     // No RULE-SET entries are generated; all rules are expanded inline.
                     strLine = trimWhitespace(strLine, true, true);
                     if(strLine.empty()) continue;
-                    // Clash does not support USER-AGENT or URL-REGEX rules
-                    if(startsWith(strLine, "USER-AGENT,"))
-                        continue;
-                    if(startsWith(strLine, "URL-REGEX,"))
-                        strLine = "DOMAIN-REGEX," + strLine.substr(10);
+                    // Filter non-Clash rule types against ClashRuleTypes
+                    // URL-REGEX can be converted to DOMAIN-REGEX; everything else is skipped
+                    {
+                        bool is_clash_rule = false;
+                        for(const auto &t : ClashRuleTypes)
+                            if(startsWith(strLine, t)) { is_clash_rule = true; break; }
+                        if(!is_clash_rule)
+                        {
+                            if(startsWith(strLine, "URL-REGEX,"))
+                                strLine = "DOMAIN-REGEX," + strLine.substr(10);
+                            else
+                                continue;
+                        }
+                    }
                     if(dedup) {
                         std::string key = getRuleKey(strLine);
                         if(!dedupKeys.emplace(key).second)

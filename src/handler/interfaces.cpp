@@ -44,7 +44,8 @@ std::string parseProxy(const std::string &source)
     return proxy;
 }
 
-extern string_array ClashRuleTypes, SurgeRuleTypes, QuanXRuleTypes;
+extern const string_array ClashRuleTypes;
+extern string_array SurgeRuleTypes, QuanXRuleTypes;
 
 struct UAProfile
 {
