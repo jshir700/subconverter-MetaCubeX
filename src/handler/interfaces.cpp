@@ -823,6 +823,13 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
     int interval = !argUpdateInterval.empty() ? to_int(argUpdateInterval, global.updateInterval) : global.updateInterval;
     bool authorized = !global.APIMode || getUrlArg(argument, "token") == global.accessToken, strict = !argUpdateStrict.empty() ? argUpdateStrict == "true" : global.updateStrict;
 
+    /// Reject unauthorized /sub requests when a password is explicitly configured
+    if(global.APIMode && !global.accessToken.empty() && !authorized)
+    {
+        *status_code = 403;
+        return "Forbidden\n";
+    }
+
     if(std::find(gRegexBlacklist.cbegin(), gRegexBlacklist.cend(), argIncludeRemark) != gRegexBlacklist.cend() || std::find(gRegexBlacklist.cbegin(), gRegexBlacklist.cend(), argExcludeRemark) != gRegexBlacklist.cend())
         return "Invalid request!";
 
