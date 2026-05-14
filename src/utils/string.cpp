@@ -14,6 +14,8 @@ std::vector<std::string> split(const std::string &s, const std::string &separato
 {
     string_size bpos = 0, epos = s.find(separator);
     std::vector<std::string> result;
+    if(!separator.empty())
+        result.reserve(std::count(s.begin(), s.end(), separator[0]) + 1);
     while(bpos < s.size())
     {
         if(epos == std::string::npos)
@@ -242,53 +244,20 @@ std::string trimWhitespace(const std::string &str, bool before, bool after)
 
 std::string getUrlArg(const std::string &url, const std::string &request)
 {
-    //std::smatch result;
-    /*
-    if (regex_search(url.cbegin(), url.cend(), result, std::regex(request + "=(.*?)&")))
-    {
-        return result[1];
-    }
-    else if (regex_search(url.cbegin(), url.cend(), result, std::regex(request + "=(.*)")))
-    {
-        return result[1];
-    }
-    else
-    {
-        return std::string();
-    }
-    */
-    /*
-    std::string::size_type spos = url.find("?");
-    if(spos != url.npos)
-        url.erase(0, spos + 1);
-
-    string_array vArray, arglist = split(url, "&");
-    for(std::string &x : arglist)
-    {
-        std::string::size_type epos = x.find("=");
-        if(epos != x.npos)
-        {
-            if(x.substr(0, epos) == request)
-                return x.substr(epos + 1);
-        }
-    }
-    */
     std::string pattern = request + "=";
-    std::string::size_type pos = url.size();
-    while(pos)
+    std::string::size_type pos = 0;
+    while(true)
     {
-        pos = url.rfind(pattern, pos);
-        if(pos != std::string::npos)
-        {
-            if(pos == 0 || url[pos - 1] == '&' || url[pos - 1] == '?')
-            {
-                pos += pattern.size();
-                return url.substr(pos, url.find('&', pos) - pos);
-            }
-        }
-        else
+        pos = url.find(pattern, pos);
+        if(pos == std::string::npos)
             break;
-        pos--;
+        // Verify this occurrence is at a query boundary
+        if(pos == 0 || url[pos - 1] == '&' || url[pos - 1] == '?')
+        {
+            pos += pattern.size();
+            return url.substr(pos, url.find('&', pos) - pos);
+        }
+        pos += pattern.size();
     }
     return "";
 }
@@ -303,6 +272,12 @@ std::string getUrlArg(const string_multimap &args, const std::string &request)
 
 std::string replaceAllDistinct(std::string str, const std::string &old_value, const std::string &new_value)
 {
+    replaceAllDistinctInPlace(str, old_value, new_value);
+    return str;
+}
+
+void replaceAllDistinctInPlace(std::string &str, const std::string &old_value, const std::string &new_value)
+{
     for(std::string::size_type pos(0); pos != std::string::npos; pos += new_value.length())
     {
         if((pos = str.find(old_value, pos)) != std::string::npos)
@@ -310,7 +285,6 @@ std::string replaceAllDistinct(std::string str, const std::string &old_value, co
         else
             break;
     }
-    return str;
 }
 
 void removeUTF8BOM(std::string &data)

@@ -284,6 +284,7 @@ std::string rulesetToClashStr(YAML::Node &base_rule, std::vector<RulesetContent>
     std::string output_content = "\n" + field_name + ":\n";
     size_t total_rules = 0;
     string_array provider_names; // track used rule-provider names for collision avoidance
+    std::unordered_set<std::string> provider_names_set; // O(1) lookup companion
     std::unordered_set<std::string> seenKeys;
 
     if(!overwrite_original_rules && base_rule[field_name].IsDefined())
@@ -321,11 +322,11 @@ std::string rulesetToClashStr(YAML::Node &base_rule, std::vector<RulesetContent>
             if(pos2 < pos || pos2 == std::string::npos)
                 pos2 = x.rule_path.size();
             rule_name = urlDecode(x.rule_path.substr(pos + 1, pos2 - pos - 1));
-            // Handle name collision
+            // Handle name collision (O(1) via set)
             {
                 std::string old_rule_name = rule_name;
                 int idx = 2;
-                while(std::find(provider_names.begin(), provider_names.end(), rule_name) != provider_names.end())
+                while(!provider_names_set.emplace(rule_name).second)
                     rule_name = old_rule_name + " " + std::to_string(idx++);
             }
             provider_names.emplace_back(rule_name);

@@ -187,7 +187,8 @@ void processRemark(std::string &remark, const string_array &remarks_list, bool p
     }
     std::string tempRemark = remark;
     int cnt = 2;
-    while(std::find(remarks_list.cbegin(), remarks_list.cend(), tempRemark) != remarks_list.cend())
+    std::unordered_set<std::string> seen(remarks_list.begin(), remarks_list.end());
+    while(seen.find(tempRemark) != seen.end())
     {
         tempRemark = remark + " " + std::to_string(cnt);
         cnt++;
@@ -223,9 +224,10 @@ void groupGenerate(const std::string &rule, std::vector<Proxy> &nodelist, string
 #endif // NO_JS_RUNTIME
     else
     {
+        std::unordered_set<std::string> seen(filtered_nodelist.begin(), filtered_nodelist.end());
         for(Proxy &x : nodelist)
         {
-            if(applyMatcher(rule, real_rule, x) && (real_rule.empty() || regFind(x.Remark, real_rule)) && std::find(filtered_nodelist.begin(), filtered_nodelist.end(), x.Remark) == filtered_nodelist.end())
+            if(applyMatcher(rule, real_rule, x) && (real_rule.empty() || regFind(x.Remark, real_rule)) && seen.insert(x.Remark).second)
                 filtered_nodelist.emplace_back(x.Remark);
         }
     }

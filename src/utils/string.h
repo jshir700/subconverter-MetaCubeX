@@ -33,6 +33,7 @@ std::string join(InputIt first, InputIt last, const std::string &delimiter)
 std::string getUrlArg(const std::string &url, const std::string &request);
 std::string getUrlArg(const string_multimap &args, const std::string &request);
 std::string replaceAllDistinct(std::string str, const std::string &old_value, const std::string &new_value);
+void replaceAllDistinctInPlace(std::string &str, const std::string &old_value, const std::string &new_value);
 std::string trimOf(const std::string& str, char target, bool before = true, bool after = true);
 std::string trim(const std::string& str, bool before = true, bool after = true);
 std::string trimQuote(const std::string &str, bool before = true, bool after = true);
@@ -70,19 +71,21 @@ inline bool endsWith(const std::string &hay, const std::string &needle)
 
 inline bool startsWith(const std::string &hay, const std::string &needle)
 {
-    return hay.find(needle) == 0;
+    return hay.size() >= needle.size() && hay.compare(0, needle.size(), needle) == 0;
 }
 
 inline bool endsWith(const std::string &hay, const std::string &needle)
 {
     auto hay_size = hay.size(), needle_size = needle.size();
-    return hay_size >= needle_size && hay.rfind(needle) == hay_size - needle_size;
+    return hay_size >= needle_size && hay.compare(hay_size - needle_size, needle_size, needle) == 0;
 }
 
 #endif
 
 inline bool count_least(const std::string &hay, const char needle, size_t cnt)
 {
+    if(cnt == 1)
+        return hay.find(needle) != std::string::npos;
     string_size pos = hay.find(needle);
     while(pos != std::string::npos)
     {
