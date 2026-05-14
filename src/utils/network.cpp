@@ -1,7 +1,12 @@
 #include <string>
 #include <vector>
 #include <sstream>
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
 #include <arpa/inet.h>
+#endif
 
 #include "server/socket.h"
 #include "string.h"
