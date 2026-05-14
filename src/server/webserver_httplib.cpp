@@ -77,10 +77,13 @@ static httplib::Server::Handler makeHandler(const responseRoute &rr)
         {
             content_type = rr.content_type;
         }
-        // gzip compression: compress responses > 10KB when client supports it
-        if(result.size() > 10240 &&
-           request.has_header("Accept-Encoding") &&
-           request.get_header_value("Accept-Encoding").find("gzip") != std::string::npos)
+        // gzip compression: only when &gzip=true URL param is set (opt-in)
+        bool use_gzip = false;
+        {
+            auto gzip_it = request.params.find("gzip");
+            use_gzip = (gzip_it != request.params.end() && gzip_it->second == "true");
+        }
+        if(result.size() > 10240 && use_gzip)
         {
             z_stream strm = {};
             deflateInit2(&strm, Z_DEFAULT_COMPRESSION, Z_DEFLATED, 15 + 16, 8, Z_DEFAULT_STRATEGY);
