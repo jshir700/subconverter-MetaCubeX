@@ -1,6 +1,7 @@
 #include <string>
 #include <vector>
 #include <sstream>
+#include <arpa/inet.h>
 
 #include "server/socket.h"
 #include "string.h"
@@ -48,13 +49,8 @@ bool isIPv4(const std::string &address)
 
 bool isIPv6(const std::string &address)
 {
-    std::vector<std::string> regLists = {"^(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}$", "^((?:[0-9A-Fa-f]{1,4}(:[0-9A-Fa-f]{1,4})*)?)::((?:([0-9A-Fa-f]{1,4}:)*[0-9A-Fa-f]{1,4})?)$", "^(::(?:[0-9A-Fa-f]{1,4})(?::[0-9A-Fa-f]{1,4}){5})|((?:[0-9A-Fa-f]{1,4})(?::[0-9A-Fa-f]{1,4}){5}::)$"};
-    for(unsigned int i = 0; i < regLists.size(); i++)
-    {
-        if(regMatch(address, regLists[i]))
-            return true;
-    }
-    return false;
+    struct sockaddr_in6 sa;
+    return inet_pton(AF_INET6, address.c_str(), &(sa.sin6_addr)) == 1;
 }
 
 void urlParse(std::string &url, std::string &host, std::string &path, int &port, bool &isTLS)
@@ -62,9 +58,12 @@ void urlParse(std::string &url, std::string &host, std::string &path, int &port,
     std::vector<std::string> args;
     string_size pos;
 
-    if(regMatch(url, "^https://(.*)"))
+    if(startsWith(url, "https://"))
         isTLS = true;
-    url = regReplace(url, "^(http|https)://", "");
+    if(startsWith(url, "http://"))
+        url.erase(0, 7);
+    else if(startsWith(url, "https://"))
+        url.erase(0, 8);
     pos = url.find("/");
     if(pos == url.npos)
     {
@@ -100,56 +99,27 @@ void urlParse(std::string &url, std::string &host, std::string &path, int &port,
 
 std::string getFormData(const std::string &raw_data)
 {
-    std::stringstream strstrm;
-    std::string line;
+    std::stringstream strstrm(raw_data);
+    std::string line, boundary;
 
-    std::string boundary;
-    std::string file; /* actual file content */
+    std::getline(strstrm, line);
+    if(line.size() > 1)
+        boundary = line.substr(0, line.size() - 1); // Get boundary (remove trailing \r)
 
-    int i = 0;
+    // Skip headers until blank line, then extract file content up to boundary
+    std::string::size_type body_start = raw_data.find("\r\n\r\n");
+    if(body_start == std::string::npos)
+        return "";
+    body_start += 4;
 
-    strstrm<<raw_data;
+    std::string::size_type body_end = raw_data.find(boundary, body_start);
+    if(body_end == std::string::npos)
+        return "";
 
-    while (std::getline(strstrm, line))
-    {
-        if(i == 0)
-            boundary = line.substr(0, line.length() - 1); // Get boundary
-        else if(startsWith(line, boundary))
-            break; // The end
-        else if(line.length() == 1)
-        {
-            // Time to get raw data
-            char c;
-            int bl = boundary.length();
-            bool endfile = false;
-            char buffer[256];
-            while(!endfile)
-            {
-                int j = 0;
-                while(j < 256 && strstrm.get(c) && !endfile)
-                {
-                    buffer[j] = c;
-                    int k = 0;
-                    // Verify if we are at the end
-                    while(boundary[bl - 1 - k] == buffer[j - k])
-                    {
-                        if(k >= bl - 1)
-                        {
-                            // We are at the end of the file
-                            endfile = true;
-                            break;
-                        }
-                        k++;
-                    }
-                    j++;
-                }
-                file.append(buffer, j);
-                j = 0;
-            };
-            file.erase(file.length() - bl);
-            break;
-        }
-        i++;
-    }
-    return file;
+    // Trim trailing \r\n before boundary
+    std::string::size_type end = body_end;
+    while(end > body_start && (raw_data[end - 1] == '\r' || raw_data[end - 1] == '\n'))
+        end--;
+
+    return raw_data.substr(body_start, end - body_start);
 }

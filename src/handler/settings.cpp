@@ -864,6 +864,15 @@ void readTOMLConf(toml::value &root)
         }
     }
 
+    {
+        std::string log_format;
+        find_if_exist(section_advanced, "log_format", log_format);
+        if(log_format == "json")
+            g_log_format = LOG_FORMAT_JSON;
+        else
+            g_log_format = LOG_FORMAT_TEXT;
+    }
+
     if(enable_cache)
     {
         global.cacheSubscription = cache_subscription;

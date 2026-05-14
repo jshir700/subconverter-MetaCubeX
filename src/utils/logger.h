@@ -33,6 +33,10 @@ std::string getTime(int type);
 void writeLog(int type, const std::string &content, int level = LOG_LEVEL_VERBOSE);
 std::string demangle(const char* name);
 
+// Log format selection (set by settings.cpp)
+enum LogFormat { LOG_FORMAT_TEXT, LOG_FORMAT_JSON };
+extern LogFormat g_log_format;
+
 template <class T>
 std::string type(const T& t) {
 

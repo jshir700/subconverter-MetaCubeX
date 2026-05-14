@@ -59,15 +59,45 @@ static std::string get_thread_name()
 }
 
 std::mutex log_mutex;
+LogFormat g_log_format = LOG_FORMAT_TEXT;
+static const char *log_level_names[] = {"FATAL", "ERROR", "WARNING", "INFO", "DEBUG", "VERBOSE"};
 
 void writeLog(int type, const std::string &content, int level)
 {
     if(level > global.logLevel)
         return;
     std::lock_guard<std::mutex> lock(log_mutex);
-    const char *levels[] = {"[FATL]", "[ERRO]", "[WARN]", "[INFO]", "[DEBG]", "[VERB]"};
-    std::cerr<<getTime(2)<<" ["<<getpid()<<" "<<get_thread_name()<<"]"<<levels[level % 6];
-    std::cerr<<" "<<content<<"\n";
+    if(g_log_format == LOG_FORMAT_JSON)
+    {
+        std::string ts(getTime(3));
+        std::string pid = std::to_string(getpid());
+        std::string tid = get_thread_name();
+        // Manual JSON construction (no dependency)
+        std::cerr << "{\"time\":\"" << ts << "\",\"pid\":" << pid
+                  << ",\"thread\":\"" << tid << "\""
+                  << ",\"level\":\"" << log_level_names[level % 6]
+                  << "\",\"message\":\"";
+        // Escape special characters in content for JSON safety
+        for(char c : content)
+        {
+            switch(c)
+            {
+            case '"':  std::cerr << "\\\""; break;
+            case '\\': std::cerr << "\\\\"; break;
+            case '\n': std::cerr << "\\n";  break;
+            case '\r': std::cerr << "\\r";  break;
+            case '\t': std::cerr << "\\t";  break;
+            default:   std::cerr << c;
+            }
+        }
+        std::cerr << "\"}\n";
+    }
+    else
+    {
+        const char *levels[] = {"[FATL]", "[ERRO]", "[WARN]", "[INFO]", "[DEBG]", "[VERB]"};
+        std::cerr<<getTime(2)<<" ["<<getpid()<<" "<<get_thread_name()<<"]"<<levels[level % 6];
+        std::cerr<<" "<<content<<"\n";
+    }
 }
 
 

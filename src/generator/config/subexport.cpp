@@ -28,9 +28,9 @@
 
 extern string_array ss_ciphers, ssr_ciphers;
 
-const string_array clashr_protocols = {"origin", "auth_sha1_v4", "auth_aes128_md5", "auth_aes128_sha1", "auth_chain_a", "auth_chain_b"};
-const string_array clashr_obfs = {"plain", "http_simple", "http_post", "random_head", "tls1.2_ticket_auth", "tls1.2_ticket_fastauth"};
-const string_array clash_ssr_ciphers = {"rc4-md5", "aes-128-ctr", "aes-192-ctr", "aes-256-ctr", "aes-128-cfb", "aes-192-cfb", "aes-256-cfb", "chacha20-ietf", "xchacha20", "none"};
+const std::unordered_set<std::string> clashr_protocols = {"origin", "auth_sha1_v4", "auth_aes128_md5", "auth_aes128_sha1", "auth_chain_a", "auth_chain_b"};
+const std::unordered_set<std::string> clashr_obfs = {"plain", "http_simple", "http_post", "random_head", "tls1.2_ticket_auth", "tls1.2_ticket_fastauth"};
+const std::unordered_set<std::string> clash_ssr_ciphers = {"rc4-md5", "aes-128-ctr", "aes-192-ctr", "aes-256-ctr", "aes-128-cfb", "aes-192-cfb", "aes-256-cfb", "chacha20-ietf", "xchacha20", "none"};
 
 std::string vmessLinkConstruct(const std::string &remarks, const std::string &add, const std::string &port, const std::string &type, const std::string &id, const std::string &aid, const std::string &net, const std::string &path, const std::string &host, const std::string &tls)
 {
@@ -588,11 +588,11 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode, const ProxyGr
 
         // Skip deprecated SSR ciphers
         if (x.Type == ProxyType::ShadowsocksR && ext.filter_deprecated) {
-            if(!clashR && std::find(clash_ssr_ciphers.cbegin(), clash_ssr_ciphers.cend(), x.EncryptMethod) == clash_ssr_ciphers.cend())
+            if(!clashR && clash_ssr_ciphers.find(x.EncryptMethod) == clash_ssr_ciphers.end())
                 continue;
-            if(std::find(clashr_protocols.cbegin(), clashr_protocols.cend(), x.Protocol) == clashr_protocols.cend())
+            if(clashr_protocols.find(x.Protocol) == clashr_protocols.end())
                 continue;
-            if(std::find(clashr_obfs.cbegin(), clashr_obfs.cend(), x.OBFS) == clashr_obfs.cend())
+            if(clashr_obfs.find(x.OBFS) == clashr_obfs.end())
                 continue;
         }
         if (x.Type == ProxyType::Shadowsocks && ext.filter_deprecated && x.EncryptMethod == "chacha20")

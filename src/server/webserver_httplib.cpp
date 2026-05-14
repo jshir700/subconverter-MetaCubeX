@@ -4,6 +4,7 @@
 #endif // MALLOC_TRIM
 #define CPPHTTPLIB_REQUEST_URI_MAX_LENGTH 16384
 #include "httplib.h"
+#include <zlib.h>
 
 #include "utils/base64/base64.h"
 #include "utils/logger.h"
@@ -76,7 +77,28 @@ static httplib::Server::Handler makeHandler(const responseRoute &rr)
         {
             content_type = rr.content_type;
         }
-        response.set_content(result, content_type);
+        // gzip compression: compress responses > 1KB when client supports it
+        if(result.size() > 1024 &&
+           request.has_header("Accept-Encoding") &&
+           request.get_header_value("Accept-Encoding").find("gzip") != std::string::npos)
+        {
+            z_stream strm = {};
+            deflateInit2(&strm, Z_DEFAULT_COMPRESSION, Z_DEFLATED, 15 + 16, 8, Z_DEFAULT_STRATEGY);
+            strm.next_in = reinterpret_cast<Bytef*>(result.data());
+            strm.avail_in = static_cast<uInt>(result.size());
+            std::string compressed(deflateBound(&strm, result.size()), '\0');
+            strm.next_out = reinterpret_cast<Bytef*>(compressed.data());
+            strm.avail_out = static_cast<uInt>(compressed.size());
+            deflate(&strm, Z_FINISH);
+            compressed.resize(strm.total_out);
+            deflateEnd(&strm);
+            response.set_content(compressed, content_type);
+            response.set_header("Content-Encoding", "gzip");
+        }
+        else
+        {
+            response.set_content(result, content_type);
+        }
     };
 }
 
@@ -142,11 +164,19 @@ int WebServer::start_web_server_multi(listener_args *args)
     });
     server.set_pre_routing_handler([&](const httplib::Request &req, httplib::Response &res)
     {
+        // /health endpoint: health check for Docker/K8s — no auth required
+        if(req.path == "/health")
+        {
+            res.status = 200;
+            res.set_header("Content-Type", "application/json");
+            std::string health_body = "{\"status\":\"ok\",\"version\":\"" VERSION "\"}";
+            res.set_content(health_body, "application/json");
+            return httplib::Server::HandlerResponse::Handled;
+        }
+
         writeLog(0, "Accept connection from client " + req.remote_addr + ":" + std::to_string(req.remote_port), LOG_LEVEL_DEBUG);
         writeLog(0, "handle_cmd:    " + req.method + " handle_uri:    " + req.target, LOG_LEVEL_VERBOSE);
         writeLog(0, "handle_header: " + dump(req.headers), LOG_LEVEL_VERBOSE);
-
-        if (req.has_header("SubConverter-Request"))
         {
             res.status = 500;
             res.set_content("Loop request detected!", "text/plain");
