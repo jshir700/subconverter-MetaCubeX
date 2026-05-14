@@ -77,8 +77,8 @@ static httplib::Server::Handler makeHandler(const responseRoute &rr)
         {
             content_type = rr.content_type;
         }
-        // gzip compression: compress responses > 1KB when client supports it
-        if(result.size() > 1024 &&
+        // gzip compression: compress responses > 10KB when client supports it
+        if(result.size() > 10240 &&
            request.has_header("Accept-Encoding") &&
            request.get_header_value("Accept-Encoding").find("gzip") != std::string::npos)
         {
