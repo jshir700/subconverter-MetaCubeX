@@ -2,6 +2,7 @@
 #include <string>
 #include <mutex>
 #include <numeric>
+#include <future>
 
 #include <yaml-cpp/yaml.h>
 
@@ -1252,9 +1253,20 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
             }
         }
 
-        // Process inline subscriptions: server-side fetch
+        // Process inline subscriptions: server-side fetch (parallel)
         if(!inline_subs.empty()) {
-            writeLog(0, "Processing " + std::to_string(inline_subs.size()) + " inlined subscription(s) (server-side fetch).", LOG_LEVEL_INFO);
+            writeLog(0, "Processing " + std::to_string(inline_subs.size()) + " inlined subscription(s) (parallel server-side fetch).", LOG_LEVEL_INFO);
+
+            struct InlineFetchResult {
+                int result;
+                std::vector<Proxy> nodes;
+                std::string sub_info;
+                int group_id;
+            };
+
+            std::vector<std::shared_future<InlineFetchResult>> fetch_futures;
+            fetch_futures.reserve(inline_subs.size());
+
             for(const auto &item : inline_subs) {
                 std::string fetch_ua = item.ua.empty()
                     ? (argProxysUA.empty() ? global.user_agent : argProxysUA)
@@ -1264,23 +1276,61 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
                 if(fetch_ua.empty())
                     fetch_ua = "subconverter-inline-fetch";
 
-                std::string saved_ua;
-                if(parse_set.custom_user_agent) {
-                    saved_ua = *parse_set.custom_user_agent;
-                    *parse_set.custom_user_agent = fetch_ua;
-                }
-
                 std::string fetch_url = item.url_decoded ? item.url : urlDecode(item.url);
-                writeLog(0, "Fetching inlined subscription: '" + fetch_url + "' with UA='" + fetch_ua + "'", LOG_LEVEL_INFO);
+                int current_group = groupID;
+                writeLog(0, "Queued inlined subscription: '" + fetch_url + "' with UA='" + fetch_ua + "'", LOG_LEVEL_INFO);
 
-                if(addNodes(fetch_url, nodes, groupID, parse_set) == -1) {
-                    writeLog(0, "Failed to fetch inlined subscription: '" + fetch_url + "'", LOG_LEVEL_WARNING);
-                }
+                fetch_futures.push_back(
+                    std::async(std::launch::async,
+                        [fetch_url, fetch_ua, current_group, &parse_set]() mutable -> InlineFetchResult
+                        {
+                            // Thread-local copies of mutable state
+                            std::vector<Proxy> local_nodes;
+                            std::string local_sub_info;
 
-                if(parse_set.custom_user_agent)
-                    *parse_set.custom_user_agent = saved_ua;
+                            // Build a thread-safe copy of parse_settings
+                            // Read-only pointers are shared; writable fields get per-thread copies
+                            parse_settings local_parse;
+                            local_parse.proxy = parse_set.proxy;
+                            local_parse.exclude_remarks = parse_set.exclude_remarks;
+                            local_parse.include_remarks = parse_set.include_remarks;
+                            local_parse.stream_rules = parse_set.stream_rules;
+                            local_parse.time_rules = parse_set.time_rules;
+                            local_parse.sub_info = &local_sub_info;
+                            local_parse.authorized = parse_set.authorized;
+                            local_parse.request_header = parse_set.request_header;
+                            local_parse.fetch_timeout = parse_set.fetch_timeout;
+#ifndef NO_JS_RUNTIME
+                            // JS runtime/context shared (safe for read-only script execution;
+                            // parallel script: links with authorized=true are extremely rare)
+                            local_parse.js_runtime = parse_set.js_runtime;
+                            local_parse.js_context = parse_set.js_context;
+#endif
+
+                            // Per-thread custom_user_agent to avoid data race (fetch_ua is mutable per lambda)
+                            local_parse.custom_user_agent = &fetch_ua;
+
+                            int ret = addNodes(fetch_url, local_nodes, current_group, local_parse);
+
+                            return {ret, std::move(local_nodes), std::move(local_sub_info), current_group};
+                        }
+                    ).share()
+                );
 
                 groupID++;
+            }
+
+            // Collect results in order
+            for(auto &f : fetch_futures) {
+                InlineFetchResult ar = f.get();
+                if(ar.result == -1) {
+                    writeLog(0, "Failed to fetch one inlined subscription.", LOG_LEVEL_WARNING);
+                }
+                // Merge nodes preserving insertion order
+                nodes.insert(nodes.end(), ar.nodes.begin(), ar.nodes.end());
+                // Keep last non-empty sub_info (matching original sequential behavior)
+                if(!ar.sub_info.empty())
+                    subInfo = std::move(ar.sub_info);
             }
         }
 
