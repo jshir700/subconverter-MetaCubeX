@@ -77,39 +77,7 @@ static httplib::Server::Handler makeHandler(const responseRoute &rr)
         {
             content_type = rr.content_type;
         }
-        // gzip compression:
-        //   - &gzip=true/false  → manual override
-        //   - &rules-provider=false → auto-enable (inline expansion = large response)
-        //   - otherwise → off
-        bool use_gzip = false;
-        {
-            auto gzip_it = request.params.find("gzip");
-            if(gzip_it != request.params.end())
-                use_gzip = (gzip_it->second == "true");
-            else {
-                auto rp_it = request.params.find("rules-provider");
-                use_gzip = (rp_it != request.params.end() && rp_it->second == "false");
-            }
-        }
-        if(result.size() > 10240 && use_gzip)
-        {
-            z_stream strm = {};
-            deflateInit2(&strm, Z_DEFAULT_COMPRESSION, Z_DEFLATED, 15 + 16, 8, Z_DEFAULT_STRATEGY);
-            strm.next_in = reinterpret_cast<Bytef*>(result.data());
-            strm.avail_in = static_cast<uInt>(result.size());
-            std::string compressed(deflateBound(&strm, result.size()), '\0');
-            strm.next_out = reinterpret_cast<Bytef*>(compressed.data());
-            strm.avail_out = static_cast<uInt>(compressed.size());
-            deflate(&strm, Z_FINISH);
-            compressed.resize(strm.total_out);
-            deflateEnd(&strm);
-            response.set_content(compressed, content_type);
-            response.set_header("Content-Encoding", "gzip");
-        }
-        else
-        {
-            response.set_content(result, content_type);
-        }
+        response.set_content(result, content_type);
     };
 }
 
